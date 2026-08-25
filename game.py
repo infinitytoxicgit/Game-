@@ -8,6 +8,7 @@ from collections import defaultdict
 
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
+from pyrogram.enums import ChatType
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ============================================================
@@ -15,9 +16,11 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ============================================================
 
 API_ID = int(os.getenv("API_ID", "35218869"))
-API_HASH = os.getenv("API_HASH", "80baadcfd00a39a0ff1f5f529d23156f)
+API_HASH = os.getenv("API_HASH", "80baadcfd00a39a0ff1f5f529d23156f")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-OWNER_ID = int(os.getenv("OWNER_ID", "8564072723")
+OWNER_ID = int(os.getenv("OWNER_ID", "8564072723"))
+
+START_IMG = "https://graph.org/file/7c0c03d68308f0c5dad42-ddb933df03f0ff0632.jpg"
 
 app = Client(
     "advanced_jumble_bot",
@@ -156,7 +159,7 @@ def is_owner(user_id):
     return user_id == OWNER_ID
 
 def is_group(message):
-    return message.chat.type in ("group", "supergroup")
+    return message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) or str(message.chat.type).lower() in ("group", "supergroup", "chattype.group", "chattype.supergroup")
 
 def clean_answer(text):
     return "".join(c.lower() for c in text if c.isalnum())
@@ -277,7 +280,6 @@ async def start_game(chat_id, difficulty, message):
     DB.execute("UPDATE games SET message_id=? WHERE chat_id=?", (sent.id, chat_id))
     DB.commit()
 
-    # Safe Pin (DM & Group)
     try:
         await sent.pin(disable_notification=True)
     except Exception:
@@ -393,16 +395,27 @@ async def finish_rapido(chat_id):
 @app.on_message(filters.command("start"))
 async def start_cmd(_, message):
     ensure_user(message.from_user)
-    await message.reply_text(
-        "🧩 **Advanced Jumble Bot**\n\n"
-        "🎮 Start game (DM/Group):\n"
-        "`/jumble easy`\n"
-        "`/jumble medium`\n"
-        "`/jumble hard`\n\n"
-        "⚔️ 1v1 Battle (Group only):\n"
-        "`/rapido @username`\n\n"
-        "🏆 `/leaderboard` | 📊 `/stats` | ❓ `/help`"
+    text = (
+        "🧩 **Welcome to Advanced Jumble Bot!**\n\n"
+        "🎮 **Game Commands:**\n"
+        "• `/jumble easy` — 2 Mins Timer\n"
+        "• `/jumble medium` — 5 Mins Timer\n"
+        "• `/jumble hard` — 10 Mins Timer\n\n"
+        "⚔️ **1v1 Rapido (Group Only):**\n"
+        "• `/rapido @username` or Reply `/rapido`\n\n"
+        "📊 **Stats & Rankings:**\n"
+        "• `/stats` — Your Game Performance\n"
+        "• `/leaderboard` — Top Global Players\n"
+        "• `/help` — Full Guide"
     )
+
+    if message.chat.type == ChatType.PRIVATE or str(message.chat.type).lower() in ("private", "chattype.private"):
+        try:
+            await message.reply_photo(photo=START_IMG, caption=text)
+        except Exception:
+            await message.reply_text(text)
+    else:
+        await message.reply_text(text)
 
 @app.on_message(filters.command("help"))
 async def help_cmd(_, message):
@@ -411,7 +424,7 @@ async def help_cmd(_, message):
         "`/jumble easy` — 2 mins timer\n"
         "`/jumble medium` — 5 mins timer\n"
         "`/jumble hard` — 10 mins timer\n\n"
-        "`/rapido @user` — 10-word fast 1v1 battle\n"
+        "`/rapido @user` — 10-word fast 1v1 battle (Group only)\n"
         "`/leaderboard` — Top players ranking\n"
         "`/stats` — Personal score & streak card\n\n"
         "💡 Har user ke paas total **3 hints** hote hain.\n"
@@ -433,16 +446,23 @@ async def rapido_cmd(_, message):
     if not is_group(message):
         return await message.reply_text("❌ Rapido sirf groups mein chalta hai.")
 
-    if len(message.command) < 2:
-        return await message.reply_text("Usage: `/rapido @username`")
+    target_user = None
 
-    try:
-        target_user = await app.get_users(message.command[1])
-    except Exception:
-        return await message.reply_text("❌ User nahi mila.")
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    elif len(message.command) >= 2:
+        try:
+            target_user = await app.get_users(message.command[1])
+        except Exception:
+            return await message.reply_text("❌ User nahi mila.")
+    else:
+        return await message.reply_text("Usage:\n• `/rapido @username`\n• Reply to a user with `/rapido`")
 
     if target_user.id == message.from_user.id:
         return await message.reply_text("❌ Khud ko challenge nahi kar sakte.")
+
+    if target_user.is_bot:
+        return await message.reply_text("❌ Bots ke sath nahi khel sakte.")
 
     ensure_user(message.from_user)
     ensure_user(target_user)
@@ -528,7 +548,6 @@ async def set_timer(_, message):
     if not (10 <= seconds <= 3600):
         return await message.reply_text("❌ 10 se 3600 seconds ke beech rakhein.")
 
-    # Guaranteed Upsert for Chat Settings
     get_settings(message.chat.id)
     DB.execute(f"""
         INSERT INTO settings(chat_id, {difficulty})
