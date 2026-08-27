@@ -22,6 +22,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "8564072723"))
 
 START_IMG = "https://graph.org/file/7c0c03d68308f0c5dad42-ddb933df03f0ff0632.jpg"
+SUPPORT_GC = "https://t.me/Roohi_Soul_Gc"
 
 app = Client(
     "advanced_jumble_bot",
@@ -98,7 +99,8 @@ CREATE TABLE IF NOT EXISTS settings (
     medium INTEGER DEFAULT 300,
     hard INTEGER DEFAULT 600,
     points_per_word INTEGER DEFAULT 10,
-    default_diff TEXT DEFAULT 'medium'
+    default_diff TEXT DEFAULT 'medium',
+    is_active INTEGER DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS games (
@@ -130,13 +132,14 @@ CREATE TABLE IF NOT EXISTS puzzle_hints (
 """)
 DB.commit()
 
-# Ensure missing columns exist in existing DB
 def run_migrations():
     cols = [c[1] for c in DB.execute("PRAGMA table_info(settings)").fetchall()]
     if "default_diff" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN default_diff TEXT DEFAULT 'medium'")
     if "points_per_word" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN points_per_word INTEGER DEFAULT 10")
+    if "is_active" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN is_active INTEGER DEFAULT 1")
     DB.commit()
 
 run_migrations()
@@ -168,8 +171,8 @@ def get_settings(chat_id):
     row = DB.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     if not row:
         DB.execute("""
-            INSERT INTO settings(chat_id, easy, medium, hard, points_per_word, default_diff)
-            VALUES (?, 120, 300, 600, 10, 'medium')
+            INSERT INTO settings(chat_id, easy, medium, hard, points_per_word, default_diff, is_active)
+            VALUES (?, 120, 300, 600, 10, 'medium', 1)
             ON CONFLICT(chat_id) DO NOTHING
         """, (chat_id,))
         DB.commit()
@@ -292,6 +295,9 @@ async def start_game(chat_id, difficulty, message_or_chat):
         return
 
     settings = get_settings(chat_id)
+    if not settings["is_active"]:
+        return
+
     DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
 
     word = choose_word(chat_id, difficulty)
@@ -317,18 +323,21 @@ async def start_game(chat_id, difficulty, message_or_chat):
         f"💬 Type your answer in the chat."
     )
 
-    if isinstance(message_or_chat, Message):
-        sent = await message_or_chat.reply_photo(photo=image, caption=caption_text, reply_markup=normal_keyboard())
-    else:
-        sent = await app.send_photo(chat_id, photo=image, caption=caption_text, reply_markup=normal_keyboard())
-
-    DB.execute("UPDATE games SET message_id=? WHERE chat_id=?", (sent.id, chat_id))
-    DB.commit()
-
     try:
-        await sent.pin(disable_notification=True)
-    except Exception:
-        pass
+        if isinstance(message_or_chat, Message):
+            sent = await message_or_chat.reply_photo(photo=image, caption=caption_text, reply_markup=normal_keyboard())
+        else:
+            sent = await app.send_photo(chat_id, photo=image, caption=caption_text, reply_markup=normal_keyboard())
+
+        DB.execute("UPDATE games SET message_id=? WHERE chat_id=?", (sent.id, chat_id))
+        DB.commit()
+
+        try:
+            await sent.pin(disable_notification=True)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"Error sending puzzle: {e}")
 
     asyncio.create_task(expire_game(chat_id, puzzle_id, expires, difficulty))
 
@@ -353,7 +362,8 @@ async def expire_game(chat_id, puzzle_id, expires, difficulty):
         pass
 
     await asyncio.sleep(3)
-    if chat_id not in RAPIDO:
+    s = get_settings(chat_id)
+    if chat_id not in RAPIDO and s["is_active"]:
         await start_game(chat_id, difficulty, chat_id)
 
 # ============================================================
@@ -371,7 +381,8 @@ def rapido_keyboard():
     ])
 
 async def rapido_timeout_task(chat_id, round_num):
-    await asyncio.sleep(RAPIDO.get(chat_id, {}).get("timer", 60))
+    timer_duration = RAPIDO.get(chat_id, {}).get("timer", 60)
+    await asyncio.sleep(timer_duration)
     async with LOCK:
         game = RAPIDO.get(chat_id)
         if not game or game["round"] != round_num:
@@ -380,10 +391,11 @@ async def rapido_timeout_task(chat_id, round_num):
         word = game["word"]
         await app.send_message(
             chat_id,
-            f"⏰ **Round {round_num} Timeout!**\n❌ Kisi ne solve nahi kiya.\n✅ Answer: **{word.upper()}**"
+            f"⏰ **Round {round_num} Timeout!**\n❌ Kisi ne solve nahi kiya.\n✅ Answer: **{word.upper()}**\n\n🔄 Next round starting..."
         )
-        await asyncio.sleep(2.5)
-        await rapido_next(chat_id)
+    
+    await asyncio.sleep(3)
+    await rapido_next(chat_id)
 
 async def rapido_next(chat_id):
     game = RAPIDO.get(chat_id)
@@ -473,18 +485,22 @@ async def start_cmd(_, message: Message):
         "🎮 **Game Commands:**\n"
         "• `/jumble` — Start Auto-loop Jumble Game\n"
         "• `/rapido @user` — 1v1 Battle with Custom Timer & Mode\n"
-        "• `/settings` — Admin Panel for Time & Difficulty\n\n"
+        "• `/settings` — Admin Panel (Start/Stop, Mode & Timer)\n\n"
         "📊 **Stats & Rankings:**\n"
         "• `/stats` — Your Performance\n"
         "• `/leaderboard` — Top Global Players\n"
         "• `/help` — Full Bot Guide"
     )
 
+    dm_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Support Group", url=SUPPORT_GC)]
+    ])
+
     if message.chat.type in (ChatType.PRIVATE,):
         try:
-            await message.reply_photo(photo=START_IMG, caption=text)
+            await message.reply_photo(photo=START_IMG, caption=text, reply_markup=dm_markup)
         except Exception:
-            await message.reply_text(text)
+            await message.reply_text(text, reply_markup=dm_markup)
     else:
         await message.reply_text(text)
 
@@ -492,9 +508,9 @@ async def start_cmd(_, message: Message):
 async def help_cmd(_, message: Message):
     await message.reply_text(
         "🧩 **Jumble Commands Guide**\n\n"
-        "`/jumble` — Start game with auto-next puzzle loop\n"
-        "`/rapido @user` — 1v1 battle match with custom mode\n"
-        "`/settings` — Admin settings panel\n"
+        "`/jumble` — Start auto-looping jumble game\n"
+        "`/rapido @user` — 1v1 battle match\n"
+        "`/settings` — Admin start/stop and game settings\n"
         "`/leaderboard` — Top players ranking\n"
         "`/stats` — Personal score card\n\n"
         "💡 Har word par aapko **3 fresh hints** milti hain.\n"
@@ -533,18 +549,21 @@ async def settings_cmd(_, message: Message):
 
     s = get_settings(message.chat.id)
     cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+    status_btn = InlineKeyboardButton("⏹️ Stop Game", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ Start Game", callback_data="set_start_game")
     
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"Mode: {str(cur_diff).upper()}", callback_data="set_menu_mode"),
-            InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers")
+            status_btn,
+            InlineKeyboardButton(f"Mode: {str(cur_diff).upper()}", callback_data="set_menu_mode")
         ],
         [
+            InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers"),
             InlineKeyboardButton("❌ Close", callback_data="close_panel")
         ]
     ])
     await message.reply_text(
         f"⚙️ **Jumble Group Settings**\n\n"
+        f"🟢 Game Status: **{'Running' if s['is_active'] else 'Stopped'}**\n"
         f"🎯 Default Mode: **{str(cur_diff).title()}**\n"
         f"⏱️ Timers: Easy: **{s['easy']}s** | Medium: **{s['medium']}s** | Hard: **{s['hard']}s**\n"
         f"⭐ Reward per word: **{s['points_per_word']} pts**",
@@ -556,6 +575,9 @@ async def jumble_cmd(_, message: Message):
     ensure_user(message.from_user)
     if message.chat.id in RAPIDO:
         return await message.reply_text("⚔️ Rapido battle chal rahi hai, game khatam hone tak wait karein.")
+
+    DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
+    DB.commit()
 
     s = get_settings(message.chat.id)
     default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
@@ -759,7 +781,8 @@ async def unified_answer_handler(_, message: Message):
         )
 
         await asyncio.sleep(3)
-        if chat_id not in RAPIDO:
+        s = get_settings(chat_id)
+        if chat_id not in RAPIDO and s["is_active"]:
             await start_game(chat_id, game["difficulty"], chat_id)
 
 # ============================================================
@@ -894,7 +917,22 @@ async def callback_router(_, query: CallbackQuery):
         if not await is_admin_or_owner(query.message.chat, user_id):
             return await query.answer("❌ Only admins can change settings.", show_alert=True)
 
-        if data == "set_menu_mode":
+        if data == "set_start_game":
+            DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (chat_id,))
+            DB.commit()
+            await query.answer("▶️ Game started!")
+            await show_settings_panel(query.message, chat_id)
+            s = get_settings(chat_id)
+            await start_game(chat_id, s["default_diff"], query.message)
+
+        elif data == "set_stop_game":
+            DB.execute("UPDATE settings SET is_active=0 WHERE chat_id=?", (chat_id,))
+            DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
+            DB.commit()
+            await query.answer("⏹️ Game stopped!")
+            await show_settings_panel(query.message, chat_id)
+
+        elif data == "set_menu_mode":
             kb = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🟢 Easy", callback_data="set_def_easy"),
@@ -959,7 +997,9 @@ async def callback_router(_, query: CallbackQuery):
         await query.message.reply_text(f"⏭️ **Skipped!**\nAnswer: **{game['word'].upper()}**\n\n🔄 Next puzzle starting in 3 seconds...")
         await query.answer("Skipped.")
         await asyncio.sleep(3)
-        await start_game(chat_id, game["difficulty"], chat_id)
+        s = get_settings(chat_id)
+        if s["is_active"]:
+            await start_game(chat_id, game["difficulty"], chat_id)
 
     elif data == "newword":
         old = DB.execute("SELECT * FROM games WHERE chat_id=?", (chat_id,)).fetchone()
@@ -977,17 +1017,21 @@ async def callback_router(_, query: CallbackQuery):
 async def show_settings_panel(message_obj, chat_id):
     s = get_settings(chat_id)
     cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+    status_btn = InlineKeyboardButton("⏹️ Stop Game", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ Start Game", callback_data="set_start_game")
+    
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"Mode: {str(cur_diff).upper()}", callback_data="set_menu_mode"),
-            InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers")
+            status_btn,
+            InlineKeyboardButton(f"Mode: {str(cur_diff).upper()}", callback_data="set_menu_mode")
         ],
         [
+            InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers"),
             InlineKeyboardButton("❌ Close", callback_data="close_panel")
         ]
     ])
     text = (
         f"⚙️ **Jumble Group Settings**\n\n"
+        f"🟢 Game Status: **{'Running' if s['is_active'] else 'Stopped'}**\n"
         f"🎯 Default Mode: **{str(cur_diff).title()}**\n"
         f"⏱️ Timers: Easy: **{s['easy']}s** | Medium: **{s['medium']}s** | Hard: **{s['hard']}s**\n"
         f"⭐ Reward per word: **{s['points_per_word']} pts**"
