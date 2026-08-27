@@ -9,6 +9,7 @@ from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatMemberStatus
+from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 # ============================================================
@@ -75,7 +76,7 @@ WORDS = {
 }
 
 # ============================================================
-# DATABASE SETUP
+# DATABASE SETUP & MIGRATIONS
 # ============================================================
 
 DB.executescript("""
@@ -128,6 +129,17 @@ CREATE TABLE IF NOT EXISTS puzzle_hints (
 );
 """)
 DB.commit()
+
+# Ensure missing columns exist in existing DB
+def run_migrations():
+    cols = [c[1] for c in DB.execute("PRAGMA table_info(settings)").fetchall()]
+    if "default_diff" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN default_diff TEXT DEFAULT 'medium'")
+    if "points_per_word" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN points_per_word INTEGER DEFAULT 10")
+    DB.commit()
+
+run_migrations()
 
 # ============================================================
 # HELPERS
@@ -255,7 +267,7 @@ def make_puzzle_image(jumbled, mode_tag, puzzle_id):
     draw.text((600, 545), "Unscramble the letters!", anchor="mm", font=small_font, fill="#aaaaaa")
 
     bio = io.BytesIO()
-    bio.name = f"puzzle_{puzzle_id}.png"
+    bio.name = f"puzzle_{puzzle_id}_{random.randint(100, 999)}.png"
     img.save(bio, "PNG")
     bio.seek(0)
     return bio
@@ -520,9 +532,11 @@ async def settings_cmd(_, message: Message):
         return await message.reply_text("❌ Only group admins can configure settings.")
 
     s = get_settings(message.chat.id)
+    cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+    
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"Mode: {s['default_diff'].upper()}", callback_data="set_menu_mode"),
+            InlineKeyboardButton(f"Mode: {str(cur_diff).upper()}", callback_data="set_menu_mode"),
             InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers")
         ],
         [
@@ -531,7 +545,7 @@ async def settings_cmd(_, message: Message):
     ])
     await message.reply_text(
         f"⚙️ **Jumble Group Settings**\n\n"
-        f"🎯 Default Mode: **{s['default_diff'].title()}**\n"
+        f"🎯 Default Mode: **{str(cur_diff).title()}**\n"
         f"⏱️ Timers: Easy: **{s['easy']}s** | Medium: **{s['medium']}s** | Hard: **{s['hard']}s**\n"
         f"⭐ Reward per word: **{s['points_per_word']} pts**",
         reply_markup=kb
@@ -544,7 +558,8 @@ async def jumble_cmd(_, message: Message):
         return await message.reply_text("⚔️ Rapido battle chal rahi hai, game khatam hone tak wait karein.")
 
     s = get_settings(message.chat.id)
-    difficulty = message.command[1].lower() if len(message.command) > 1 else s["default_diff"]
+    default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
+    difficulty = message.command[1].lower() if len(message.command) > 1 else default_d
     
     if difficulty not in WORDS:
         difficulty = "medium"
@@ -692,7 +707,7 @@ async def unified_answer_handler(_, message: Message):
         async with LOCK:
             game = RAPIDO.get(chat_id)
             if not game or user_id not in game["players"]:
-                return  # Block outside interruptions
+                return
 
             if time.time() <= game["expires"] and cleaned_input == clean_answer(game["word"]):
                 if game.get("task") and not game["task"].done():
@@ -743,7 +758,6 @@ async def unified_answer_handler(_, message: Message):
             f"🔄 Next puzzle coming in 3 seconds..."
         )
 
-        # Automatic seamless next word loop
         await asyncio.sleep(3)
         if chat_id not in RAPIDO:
             await start_game(chat_id, game["difficulty"], chat_id)
@@ -849,7 +863,6 @@ async def callback_router(_, query: CallbackQuery):
             await rapido_next(chat_id)
             return
 
-        # Update lobby text
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(f"{'✅ ' if lobby['difficulty']=='easy' else ''}Easy", callback_data="r_diff_easy"),
@@ -865,13 +878,16 @@ async def callback_router(_, query: CallbackQuery):
                 InlineKeyboardButton("🚀 START BATTLE", callback_data="r_start")
             ]
         ])
-        await query.message.edit_text(
-            f"⚔️ **RAPIDO 1v1 MATCH SETUP**\n\n"
-            f"👤 **{lobby['p1_name']}** 🆚 **{lobby['p2_name']}**\n\n"
-            f"🎯 Mode: **{lobby['difficulty'].title()}** | ⏱️ Round Timer: **{lobby['timer']}s**\n"
-            f"Press **START BATTLE** to begin!",
-            reply_markup=kb
-        )
+        try:
+            await query.message.edit_text(
+                f"⚔️ **RAPIDO 1v1 MATCH SETUP**\n\n"
+                f"👤 **{lobby['p1_name']}** 🆚 **{lobby['p2_name']}**\n\n"
+                f"🎯 Mode: **{lobby['difficulty'].title()}** | ⏱️ Round Timer: **{lobby['timer']}s**\n"
+                f"Press **START BATTLE** to begin!",
+                reply_markup=kb
+            )
+        except MessageNotModified:
+            pass
 
     # Admin Settings Menus
     elif data.startswith("set_"):
@@ -887,7 +903,10 @@ async def callback_router(_, query: CallbackQuery):
                 ],
                 [InlineKeyboardButton("🔙 Back", callback_data="set_back")]
             ])
-            await query.message.edit_text("🎯 **Default Jumble Difficulty Chuno:**", reply_markup=kb)
+            try:
+                await query.message.edit_text("🎯 **Default Jumble Difficulty Chuno:**", reply_markup=kb)
+            except MessageNotModified:
+                pass
 
         elif data == "set_menu_timers":
             kb = InlineKeyboardMarkup([
@@ -905,24 +924,27 @@ async def callback_router(_, query: CallbackQuery):
                 ],
                 [InlineKeyboardButton("🔙 Back", callback_data="set_back")]
             ])
-            await query.message.edit_text("⏱️ **Select Timer Duration:**", reply_markup=kb)
+            try:
+                await query.message.edit_text("⏱️ **Select Timer Duration:**", reply_markup=kb)
+            except MessageNotModified:
+                pass
 
         elif data.startswith("set_def_"):
             d = data.split("_")[2]
             DB.execute("UPDATE settings SET default_diff=? WHERE chat_id=?", (d, chat_id))
             DB.commit()
             await query.answer(f"Default mode set to {d.upper()}")
-            await settings_cmd(app, query.message)
+            await show_settings_panel(query.message, chat_id)
 
         elif data.startswith("set_t_"):
             _, _, diff, secs = data.split("_")
             DB.execute(f"UPDATE settings SET {diff}=? WHERE chat_id=?", (int(secs), chat_id))
             DB.commit()
             await query.answer(f"{diff.title()} timer updated to {secs}s")
-            await settings_cmd(app, query.message)
+            await show_settings_panel(query.message, chat_id)
 
         elif data == "set_back":
-            await settings_cmd(app, query.message)
+            await show_settings_panel(query.message, chat_id)
 
     elif data == "skip":
         if not await is_admin_or_owner(query.message.chat, user_id):
@@ -944,15 +966,39 @@ async def callback_router(_, query: CallbackQuery):
         if old and not old["solved"] and time.time() <= old["expires"]:
             return await query.answer("❌ Current puzzle abhi active hai.", show_alert=True)
 
-        difficulty = old["difficulty"] if old else "medium"
+        s = get_settings(chat_id)
+        difficulty = old["difficulty"] if old else s["default_diff"]
         await query.answer("🧩 Starting new puzzle...")
         await start_game(chat_id, difficulty, query.message)
 
     elif data == "close_panel":
         await query.message.delete()
 
+async def show_settings_panel(message_obj, chat_id):
+    s = get_settings(chat_id)
+    cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"Mode: {str(cur_diff).upper()}", callback_data="set_menu_mode"),
+            InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers")
+        ],
+        [
+            InlineKeyboardButton("❌ Close", callback_data="close_panel")
+        ]
+    ])
+    text = (
+        f"⚙️ **Jumble Group Settings**\n\n"
+        f"🎯 Default Mode: **{str(cur_diff).title()}**\n"
+        f"⏱️ Timers: Easy: **{s['easy']}s** | Medium: **{s['medium']}s** | Hard: **{s['hard']}s**\n"
+        f"⭐ Reward per word: **{s['points_per_word']} pts**"
+    )
+    try:
+        await message_obj.edit_text(text, reply_markup=kb)
+    except MessageNotModified:
+        pass
+
 # ============================================================
-# START BOT
+# RUN BOT
 # ============================================================
 
 if __name__ == "__main__":
