@@ -381,21 +381,30 @@ def rapido_keyboard():
     ])
 
 async def rapido_timeout_task(chat_id, round_num):
-    timer_duration = RAPIDO.get(chat_id, {}).get("timer", 60)
+    game = RAPIDO.get(chat_id)
+    if not game:
+        return
+
+    timer_duration = game.get("timer", 60)
     await asyncio.sleep(timer_duration)
+
+    should_advance = False
     async with LOCK:
         game = RAPIDO.get(chat_id)
-        if not game or game["round"] != round_num:
-            return
+        if game and game["round"] == round_num:
+            word = game["word"]
+            try:
+                await app.send_message(
+                    chat_id,
+                    f"⏰ **Round {round_num} Timeout!**\n❌ Kisi ne solve nahi kiya.\n✅ Answer: **{word.upper()}**\n\n🔄 Next round starting..."
+                )
+            except Exception:
+                pass
+            should_advance = True
 
-        word = game["word"]
-        await app.send_message(
-            chat_id,
-            f"⏰ **Round {round_num} Timeout!**\n❌ Kisi ne solve nahi kiya.\n✅ Answer: **{word.upper()}**\n\n🔄 Next round starting..."
-        )
-    
-    await asyncio.sleep(3)
-    await rapido_next(chat_id)
+    if should_advance:
+        await asyncio.sleep(3)
+        await rapido_next(chat_id)
 
 async def rapido_next(chat_id):
     game = RAPIDO.get(chat_id)
@@ -403,7 +412,10 @@ async def rapido_next(chat_id):
         return
 
     if game.get("task") and not game["task"].done():
-        game["task"].cancel()
+        try:
+            game["task"].cancel()
+        except Exception:
+            pass
 
     game["round"] += 1
     if game["round"] > 10:
@@ -420,23 +432,25 @@ async def rapido_next(chat_id):
 
     image = make_puzzle_image(jumbled, f"RAPIDO {diff.upper()}", game["round"])
     
-    sent = await app.send_photo(
-        chat_id,
-        photo=image,
-        caption=(
-            f"⚔️ **RAPIDO — ROUND {game['round']}/10**\n\n"
-            f"🎯 Difficulty: **{diff.title()}**\n"
-            f"⏱️ Time: **{game['timer']}s**\n"
-            f"🔀 Solve fastest!\n"
-            f"👥 Players: {game['names'][game['players'][0]]} 🆚 {game['names'][game['players'][1]]}"
-        ),
-        reply_markup=rapido_keyboard()
-    )
-
     try:
-        await sent.pin(disable_notification=True)
-    except Exception:
-        pass
+        sent = await app.send_photo(
+            chat_id,
+            photo=image,
+            caption=(
+                f"⚔️ **RAPIDO — ROUND {game['round']}/10**\n\n"
+                f"🎯 Difficulty: **{diff.title()}**\n"
+                f"⏱️ Time: **{game['timer']}s**\n"
+                f"🔀 Solve fastest!\n"
+                f"👥 Players: {game['names'][game['players'][0]]} 🆚 {game['names'][game['players'][1]]}"
+            ),
+            reply_markup=rapido_keyboard()
+        )
+        try:
+            await sent.pin(disable_notification=True)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"Rapido send error: {e}")
 
     game["task"] = asyncio.create_task(rapido_timeout_task(chat_id, game["round"]))
 
@@ -446,7 +460,10 @@ async def finish_rapido(chat_id):
         return
 
     if game.get("task") and not game["task"].done():
-        game["task"].cancel()
+        try:
+            game["task"].cancel()
+        except Exception:
+            pass
 
     p1, p2 = game["players"]
     s1, s2 = game["scores"][p1], game["scores"][p2]
@@ -472,6 +489,13 @@ async def finish_rapido(chat_id):
         result += "🤝 **Match Draw!**"
 
     await app.send_message(chat_id, result)
+
+    # Automatically resume main jumble game if enabled by admin
+    await asyncio.sleep(3)
+    s = get_settings(chat_id)
+    if s["is_active"]:
+        await app.send_message(chat_id, "🔄 Resuming normal Jumble Game...")
+        await start_game(chat_id, s["default_diff"], chat_id)
 
 # ============================================================
 # COMMANDS
@@ -574,7 +598,7 @@ async def settings_cmd(_, message: Message):
 async def jumble_cmd(_, message: Message):
     ensure_user(message.from_user)
     if message.chat.id in RAPIDO:
-        return await message.reply_text("⚔️ Rapido battle chal rahi hai, game khatam hone tak wait karein.")
+        return await message.reply_text("⚔️ Rapido battle chal rahi hai, match khatam hone tak wait karein.")
 
     DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
     DB.commit()
@@ -733,7 +757,10 @@ async def unified_answer_handler(_, message: Message):
 
             if time.time() <= game["expires"] and cleaned_input == clean_answer(game["word"]):
                 if game.get("task") and not game["task"].done():
-                    game["task"].cancel()
+                    try:
+                        game["task"].cancel()
+                    except Exception:
+                        pass
 
                 game["scores"][user_id] += 1
                 await message.reply_text(
