@@ -85,7 +85,6 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT,
     points INTEGER DEFAULT 0,
     solved INTEGER DEFAULT 0,
-    hints INTEGER DEFAULT 3,
     best_streak INTEGER DEFAULT 0,
     streak INTEGER DEFAULT 0,
     rapido_wins INTEGER DEFAULT 0,
@@ -116,6 +115,15 @@ CREATE TABLE IF NOT EXISTS used_words (
     difficulty TEXT,
     word TEXT,
     PRIMARY KEY(chat_id, difficulty, word)
+);
+
+CREATE TABLE IF NOT EXISTS puzzle_hints (
+    chat_id INTEGER,
+    puzzle_id INTEGER,
+    user_id INTEGER,
+    hints_used INTEGER DEFAULT 0,
+    revealed_indices TEXT DEFAULT '',
+    PRIMARY KEY(chat_id, puzzle_id, user_id)
 );
 """)
 DB.commit()
@@ -166,7 +174,7 @@ def clean_answer(text):
 
 def jumble_word(word):
     letters = list(word)
-    for _ in range(30):
+    for _ in range(50):
         random.shuffle(letters)
         result = "".join(letters)
         if result != word and result[::-1] != word:
@@ -194,7 +202,7 @@ def choose_word(chat_id, difficulty):
     DB.commit()
     return word
 
-def font(size):
+def get_font(size):
     paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
@@ -202,24 +210,41 @@ def font(size):
     ]
     for path in paths:
         if os.path.exists(path):
-            return ImageFont.truetype(path, size)
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
     return ImageFont.load_default()
 
 def make_puzzle_image(jumbled, difficulty, puzzle_id):
     img = Image.new("RGB", (1200, 650), "#10131a")
     draw = ImageDraw.Draw(img)
 
-    title_font = font(55)
-    word_font = font(90)
-    small_font = font(35)
+    title_font = get_font(55)
+    small_font = get_font(35)
+
+    # Dynamic Font Calculation to prevent text cutoff
+    text_len = len(jumbled)
+    if text_len <= 7:
+        display_text = "   ".join(jumbled)
+        word_font = get_font(85)
+    elif text_len <= 11:
+        display_text = "  ".join(jumbled)
+        word_font = get_font(65)
+    elif text_len <= 15:
+        display_text = " ".join(jumbled)
+        word_font = get_font(50)
+    else:
+        display_text = " ".join(jumbled)
+        word_font = get_font(38)
 
     draw.text((600, 70), "🧩 JUMBLE WORD", anchor="mm", font=title_font, fill="white")
-    draw.text((600, 300), "   ".join(jumbled), anchor="mm", font=word_font, fill="#00e5ff")
+    draw.text((600, 300), display_text, anchor="mm", font=word_font, fill="#00e5ff")
     draw.text((600, 480), f"{difficulty.upper()}  •  PUZZLE #{puzzle_id}", anchor="mm", font=small_font, fill="#ffffff")
     draw.text((600, 545), "Unscramble the letters!", anchor="mm", font=small_font, fill="#aaaaaa")
 
     bio = io.BytesIO()
-    bio.name = "jumble.png"
+    bio.name = "puzzle.png"
     img.save(bio, "PNG")
     bio.seek(0)
     return bio
@@ -227,7 +252,7 @@ def make_puzzle_image(jumbled, difficulty, puzzle_id):
 def normal_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💡 Hint", callback_data="hint"),
+            InlineKeyboardButton("💡 Hint (3/word)", callback_data="hint"),
             InlineKeyboardButton("⏭️ Skip", callback_data="skip")
         ],
         [
@@ -323,7 +348,7 @@ async def rapido_timeout_task(chat_id, round_num):
             chat_id,
             f"⏰ **Round {round_num} Timeout!**\n❌ Kisi ne solve nahi kiya.\n✅ Answer: **{word.upper()}**"
         )
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         await rapido_next(chat_id)
 
 async def rapido_next(chat_id):
@@ -339,12 +364,15 @@ async def rapido_next(chat_id):
         await finish_rapido(chat_id)
         return
 
-    word = random.choice(WORDS[random.choice(["easy", "medium", "hard"])])
+    diff = random.choice(["easy", "medium", "hard"])
+    word = random.choice(WORDS[diff])
+    jumbled = jumble_word(word)
+
     game["word"] = word
     game["expires"] = time.time() + 60
     game["task"] = asyncio.create_task(rapido_timeout_task(chat_id, game["round"]))
 
-    image = make_puzzle_image(jumble_word(word), "RAPIDO", game["round"])
+    image = make_puzzle_image(jumbled, f"RAPIDO {diff.upper()}", game["round"])
     await app.send_photo(
         chat_id,
         image,
@@ -426,10 +454,36 @@ async def help_cmd(_, message):
         "`/jumble hard` — 10 mins timer\n\n"
         "`/rapido @user` — 10-word fast 1v1 battle (Group only)\n"
         "`/leaderboard` — Top players ranking\n"
-        "`/stats` — Personal score & streak card\n\n"
-        "💡 Har user ke paas total **3 hints** hote hain.\n"
-        "✅ Sahi answer dene par points aur streak milti hai."
+        "`/stats` — Personal score card\n\n"
+        "💡 Har word par aapko **3 fresh hints** milti hain.\n"
+        "👑 **Owner Commands:**\n"
+        "`/addword easy word` — Add new word\n"
+        "`/settimer easy 120` — Set timer\n"
+        "`/setpoints 20` — Set points"
     )
+
+@app.on_message(filters.command("addword"))
+async def addword_cmd(_, message):
+    if not is_owner(message.from_user.id):
+        return await message.reply_text("❌ Owner only command.")
+
+    if len(message.command) < 3:
+        return await message.reply_text("Usage:\n`/addword easy word`\n`/addword medium word`\n`/addword hard word`")
+
+    difficulty = message.command[1].lower()
+    new_word = clean_answer(message.command[2])
+
+    if difficulty not in WORDS:
+        return await message.reply_text("❌ Category must be `easy`, `medium`, or `hard`.")
+
+    if len(new_word) < 3:
+        return await message.reply_text("❌ Word bohot chhota hai.")
+
+    if new_word in WORDS[difficulty]:
+        return await message.reply_text("⚠️ Yeh word pehle se word bank mein exist karta hai.")
+
+    WORDS[difficulty].append(new_word)
+    await message.reply_text(f"✅ Word **'{new_word.upper()}'** successfully added to **{difficulty.upper()}** bank!")
 
 @app.on_message(filters.command("jumble"))
 async def jumble_cmd(_, message):
@@ -469,7 +523,7 @@ async def rapido_cmd(_, message):
 
     key = message.chat.id
     if key in RAPIDO:
-        return await message.reply_text("⚔️ Is group mein already Rapido game chal raha hai.")
+        return await message.reply_text("⚔️ Is group mein already Rapido chal raha hai.")
 
     RAPIDO[key] = {
         "players": [message.from_user.id, target_user.id],
@@ -507,7 +561,7 @@ async def stats_cmd(_, message):
         f"🧩 Solved: **{u['solved']}**\n"
         f"🔥 Current Streak: **{u['streak']}**\n"
         f"🏅 Best Streak: **{u['best_streak']}**\n"
-        f"💡 Hints Remaining: **{u['hints']}/3**\n\n"
+        f"💡 Hints: **3 per puzzle**\n\n"
         f"⚔️ Rapido Record: **{u['rapido_wins']}W - {u['rapido_losses']}L**\n"
         f"📈 Win Rate: **{winrate:.1f}%**"
     )
@@ -584,14 +638,6 @@ async def set_points(_, message):
 
     await message.reply_text(f"✅ Is chat mein per word reward **{points} points** set kar diya.")
 
-@app.on_message(filters.command("resethints"))
-async def reset_hints(_, message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("❌ Owner only command.")
-    DB.execute("UPDATE users SET hints=3")
-    DB.commit()
-    await message.reply_text("✅ Sabhi players ke hints **3/3** reset kar diye gaye.")
-
 # ============================================================
 # UNIFIED ANSWER HANDLER
 # ============================================================
@@ -600,7 +646,7 @@ async def reset_hints(_, message):
     filters.text &
     ~filters.command([
         "start", "help", "jumble", "stats", "leaderboard",
-        "rapido", "settimer", "setpoints", "resethints"
+        "rapido", "settimer", "setpoints", "addword"
     ])
 )
 async def unified_answer_handler(_, message):
@@ -625,7 +671,7 @@ async def unified_answer_handler(_, message):
                         f"⚡ **{message.from_user.first_name} WON ROUND {game['round']}!**\n"
                         f"🏆 Round Score: {game['scores'][user_id]}"
                     )
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2.5)
                     await rapido_next(chat_id)
                     return
 
@@ -678,21 +724,41 @@ async def hint_callback(_, query):
         return await query.answer("Koi active puzzle nahi hai.", show_alert=True)
 
     ensure_user(query.from_user)
-    user = get_user(user_id)
-
-    if user["hints"] <= 0:
-        return await query.answer("❌ Tumhari 3 hints already use ho chuki hain.", show_alert=True)
-
+    puzzle_id = game["puzzle_id"]
     word = game["word"]
-    index = random.randrange(len(word))
-    revealed = word[index].upper()
 
-    DB.execute("UPDATE users SET hints=hints-1 WHERE user_id=? AND hints>0", (user_id,))
+    hint_row = DB.execute("""
+        SELECT * FROM puzzle_hints
+        WHERE chat_id=? AND puzzle_id=? AND user_id=?
+    """, (chat_id, puzzle_id, user_id)).fetchone()
+
+    hints_used = hint_row["hints_used"] if hint_row else 0
+    revealed_indices = [int(i) for i in hint_row["revealed_indices"].split(",") if i] if hint_row else []
+
+    if hints_used >= 3:
+        return await query.answer("❌ Is word ke liye aapki 3 hints complete ho chuki hain!", show_alert=True)
+
+    available_indices = [i for i in range(len(word)) if i not in revealed_indices]
+    if not available_indices:
+        return await query.answer("❌ Ab aur hints available nahi hain.", show_alert=True)
+
+    chosen_index = random.choice(available_indices)
+    revealed_indices.append(chosen_index)
+    hints_used += 1
+
+    DB.execute("""
+        INSERT INTO puzzle_hints(chat_id, puzzle_id, user_id, hints_used, revealed_indices)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, puzzle_id, user_id) DO UPDATE SET
+            hints_used=excluded.hints_used,
+            revealed_indices=excluded.revealed_indices
+    """, (chat_id, puzzle_id, user_id, hints_used, ",".join(map(str, revealed_indices))))
     DB.commit()
 
-    rem = user["hints"] - 1
+    letter = word[chosen_index].upper()
+    rem = 3 - hints_used
     await query.answer(
-        f"💡 Hint: Letter #{index + 1} is '{revealed}'\nHints remaining: {rem}/3",
+        f"💡 Hint: Letter #{chosen_index + 1} is '{letter}'\nHints remaining for this word: {rem}/3",
         show_alert=True
     )
 
