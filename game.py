@@ -36,10 +36,10 @@ DB.row_factory = sqlite3.Row
 LOCK = asyncio.Lock()
 
 # ============================================================
-# WORD BANK
+# DEFAULT WORD BANK
 # ============================================================
 
-EASY = """
+DEFAULT_EASY = """
 apple banana orange mango table chair house water school friend family
 happy garden flower animal window bottle mobile computer summer winter
 river music movie player football cricket doctor teacher market village
@@ -48,7 +48,7 @@ train bus road car earth world light night star cloud rain green blue
 black white tiger lion horse rabbit monkey fish bird tree fruit
 """.split()
 
-MEDIUM = """
+DEFAULT_MEDIUM = """
 adventure beautiful knowledge education important dangerous different
 experience friendship happiness technology information internet
 mountain waterfall sunshine keyboard hospital university restaurant
@@ -59,7 +59,7 @@ photography creativity imagination discovery opportunity challenge
 journey traveler vacation airport railway newspaper magazine
 """.split()
 
-HARD = """
+DEFAULT_HARD = """
 extraordinary responsibility communication determination independence
 international transformation understanding environment intelligence
 architecture investigation recommendation administration opportunity
@@ -69,12 +69,6 @@ philosophy civilization transportation infrastructure globalization
 misunderstanding pronunciation encyclopedia experimentation
 electromagnetism thermodynamics interoperability decentralization
 """.split()
-
-WORDS = {
-    "easy": list(set(w.lower() for w in EASY if len(w) >= 4)),
-    "medium": list(set(w.lower() for w in MEDIUM if len(w) >= 6)),
-    "hard": list(set(w.lower() for w in HARD if len(w) >= 8))
-}
 
 # ============================================================
 # DATABASE SETUP & MIGRATIONS
@@ -91,6 +85,19 @@ CREATE TABLE IF NOT EXISTS users (
     streak INTEGER DEFAULT 0,
     rapido_wins INTEGER DEFAULT 0,
     rapido_losses INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS auth_users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    name TEXT,
+    added_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS custom_words (
+    difficulty TEXT,
+    word TEXT,
+    PRIMARY KEY(difficulty, word)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -145,7 +152,25 @@ def run_migrations():
 run_migrations()
 
 # ============================================================
-# HELPERS
+# WORD SYSTEM INITIALIZATION
+# ============================================================
+
+WORDS = {
+    "easy": list(set(w.lower() for w in DEFAULT_EASY if len(w) >= 4)),
+    "medium": list(set(w.lower() for w in DEFAULT_MEDIUM if len(w) >= 6)),
+    "hard": list(set(w.lower() for w in HARD if len(w) >= 8)) if 'HARD' in locals() else list(set(w.lower() for w in DEFAULT_HARD if len(w) >= 8))
+}
+
+# Load custom words from DB
+custom_rows = DB.execute("SELECT difficulty, word FROM custom_words").fetchall()
+for row in custom_rows:
+    diff = row["difficulty"]
+    w = row["word"].lower()
+    if diff in WORDS and w not in WORDS[diff]:
+        WORDS[diff].append(w)
+
+# ============================================================
+# HELPERS & PERMISSIONS
 # ============================================================
 
 def ensure_user(user):
@@ -167,6 +192,26 @@ def ensure_user(user):
 def get_user(user_id):
     return DB.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
 
+def is_owner(user_id):
+    return user_id == OWNER_ID
+
+def is_authed(user_id):
+    if is_owner(user_id):
+        return True
+    row = DB.execute("SELECT user_id FROM auth_users WHERE user_id=?", (user_id,)).fetchone()
+    return bool(row)
+
+async def is_admin_or_owner(chat, user_id):
+    if is_owner(user_id):
+        return True
+    if chat.type in (ChatType.PRIVATE,):
+        return True
+    try:
+        member = await chat.get_member(user_id)
+        return member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR)
+    except Exception:
+        return False
+
 def get_settings(chat_id):
     row = DB.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     if not row:
@@ -178,20 +223,6 @@ def get_settings(chat_id):
         DB.commit()
         row = DB.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     return row
-
-def is_owner(user_id):
-    return user_id == OWNER_ID
-
-async def is_admin_or_owner(chat, user_id):
-    if user_id == OWNER_ID:
-        return True
-    if chat.type in (ChatType.PRIVATE,):
-        return True
-    try:
-        member = await chat.get_member(user_id)
-        return member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR)
-    except Exception:
-        return False
 
 def is_group(message):
     return message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) or str(message.chat.type).lower() in ("group", "supergroup", "chattype.group", "chattype.supergroup")
@@ -364,7 +395,7 @@ async def expire_game(chat_id, puzzle_id, expires, difficulty):
     await asyncio.sleep(3)
     s = get_settings(chat_id)
     if chat_id not in RAPIDO and s["is_active"]:
-        await start_game(chat_id, difficulty, chat_id)
+        asyncio.create_task(start_game(chat_id, difficulty, chat_id))
 
 # ============================================================
 # RAPIDO 1v1 SYSTEM
@@ -380,12 +411,7 @@ def rapido_keyboard():
         ]
     ])
 
-async def rapido_timeout_task(chat_id, round_num):
-    game = RAPIDO.get(chat_id)
-    if not game:
-        return
-
-    timer_duration = game.get("timer", 60)
+async def rapido_timeout_task(chat_id, round_num, timer_duration):
     await asyncio.sleep(timer_duration)
 
     should_advance = False
@@ -403,15 +429,17 @@ async def rapido_timeout_task(chat_id, round_num):
             should_advance = True
 
     if should_advance:
-        await asyncio.sleep(3)
-        await rapido_next(chat_id)
+        await asyncio.sleep(2.5)
+        asyncio.create_task(rapido_next(chat_id))
 
 async def rapido_next(chat_id):
     game = RAPIDO.get(chat_id)
     if not game:
         return
 
-    if game.get("task") and not game["task"].done():
+    # Clean cancellation of previous task without self-cancelling
+    curr = asyncio.current_task()
+    if game.get("task") and game["task"] is not curr and not game["task"].done():
         try:
             game["task"].cancel()
         except Exception:
@@ -452,14 +480,15 @@ async def rapido_next(chat_id):
     except Exception as e:
         print(f"Rapido send error: {e}")
 
-    game["task"] = asyncio.create_task(rapido_timeout_task(chat_id, game["round"]))
+    game["task"] = asyncio.create_task(rapido_timeout_task(chat_id, game["round"], game["timer"]))
 
 async def finish_rapido(chat_id):
     game = RAPIDO.pop(chat_id, None)
     if not game:
         return
 
-    if game.get("task") and not game["task"].done():
+    curr = asyncio.current_task()
+    if game.get("task") and game["task"] is not curr and not game["task"].done():
         try:
             game["task"].cancel()
         except Exception:
@@ -490,12 +519,12 @@ async def finish_rapido(chat_id):
 
     await app.send_message(chat_id, result)
 
-    # Automatically resume main jumble game if enabled by admin
+    # Automatically resume group's jumble game if active
     await asyncio.sleep(3)
     s = get_settings(chat_id)
     if s["is_active"]:
         await app.send_message(chat_id, "🔄 Resuming normal Jumble Game...")
-        await start_game(chat_id, s["default_diff"], chat_id)
+        asyncio.create_task(start_game(chat_id, s["default_diff"], chat_id))
 
 # ============================================================
 # COMMANDS
@@ -530,7 +559,8 @@ async def start_cmd(_, message: Message):
 
 @app.on_message(filters.command("help"))
 async def help_cmd(_, message: Message):
-    await message.reply_text(
+    is_user_auth = is_authed(message.from_user.id)
+    text = (
         "🧩 **Jumble Commands Guide**\n\n"
         "`/jumble` — Start auto-looping jumble game\n"
         "`/rapido @user` — 1v1 battle match\n"
@@ -538,33 +568,179 @@ async def help_cmd(_, message: Message):
         "`/leaderboard` — Top players ranking\n"
         "`/stats` — Personal score card\n\n"
         "💡 Har word par aapko **3 fresh hints** milti hain.\n"
-        "👑 **Owner Commands:**\n"
-        "`/addword easy word` — Add new word to bank\n"
-        "`/setpoints 20` — Set per-word reward"
     )
+    if is_user_auth:
+        text += (
+            "\n🔐 **Auth / Word Bank Commands:**\n"
+            "`/word` — View categorized word bank\n"
+            "`/addword easy word` — Add new word to bank\n"
+            "`/delword easy word` — Delete word from bank\n"
+        )
+    if is_owner(message.from_user.id):
+        text += (
+            "\n👑 **Owner Commands:**\n"
+            "`/auth @user` — Grant auth access\n"
+            "`/unauth @user` — Revoke auth access\n"
+            "`/authlist` — List of authorized users\n"
+            "`/setpoints 20` — Set per-word reward\n"
+        )
+    await message.reply_text(text)
+
+# ============================================================
+# AUTH SYSTEM (OWNER ONLY)
+# ============================================================
+
+@app.on_message(filters.command("auth"))
+async def auth_cmd(_, message: Message):
+    if not is_owner(message.from_user.id):
+        return await message.reply_text("❌ Sirf Bot Owner auth de sakta hai.")
+
+    target = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+    elif len(message.command) >= 2:
+        try:
+            target = await app.get_users(message.command[1])
+        except Exception:
+            return await message.reply_text("❌ User nahi mila.")
+    else:
+        return await message.reply_text("Usage:\n`/auth @username` or Reply `/auth`")
+
+    if target.is_bot:
+        return await message.reply_text("❌ Bots ko auth nahi diya ja sakta.")
+
+    DB.execute("""
+        INSERT INTO auth_users(user_id, username, name, added_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=excluded.username,
+            name=excluded.name
+    """, (target.id, target.username or "", target.first_name or "User", time.time()))
+    DB.commit()
+
+    await message.reply_text(f"✅ **{target.first_name}** ko successfully **Auth Access** de diya gaya hai.")
+
+@app.on_message(filters.command("unauth"))
+async def unauth_cmd(_, message: Message):
+    if not is_owner(message.from_user.id):
+        return await message.reply_text("❌ Sirf Bot Owner unauth kar sakta hai.")
+
+    target = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+    elif len(message.command) >= 2:
+        try:
+            target = await app.get_users(message.command[1])
+        except Exception:
+            return await message.reply_text("❌ User nahi mila.")
+    else:
+        return await message.reply_text("Usage:\n`/unauth @username` or Reply `/unauth`")
+
+    DB.execute("DELETE FROM auth_users WHERE user_id=?", (target.id,))
+    DB.commit()
+
+    await message.reply_text(f"🚫 **{target.first_name}** ka auth access remove kar diya gaya.")
+
+@app.on_message(filters.command("authlist"))
+async def authlist_cmd(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Auth users authlist dekh sakte hain.")
+
+    rows = DB.execute("SELECT * FROM auth_users ORDER BY added_at DESC").fetchall()
+    text = "🔐 **AUTHORIZED USERS LIST**\n\n"
+    text += f"👑 **Owner:** `{OWNER_ID}`\n\n"
+
+    if not rows:
+        text += "Koi extra authorized user nahi hai."
+    else:
+        for i, row in enumerate(rows, 1):
+            uname = f"@{row['username']}" if row['username'] else "No Username"
+            text += f"`{i}.` **{row['name']}** ({uname}) — ID: `{row['user_id']}`\n"
+
+    await message.reply_text(text)
+
+# ============================================================
+# WORD BANK MANAGEMENT (OWNER & AUTH USERS)
+# ============================================================
 
 @app.on_message(filters.command("addword"))
 async def addword_cmd(_, message: Message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("❌ Owner only command.")
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Aap authorized nahi hain.")
 
     if len(message.command) < 3:
-        return await message.reply_text("Usage:\n`/addword easy word`\n`/addword medium word`\n`/addword hard word`")
+        return await message.reply_text("Usage:\n`/addword easy apple`\n`/addword medium computer`\n`/addword hard international`")
 
     difficulty = message.command[1].lower()
     new_word = clean_answer(message.command[2])
 
     if difficulty not in WORDS:
-        return await message.reply_text("❌ Category must be `easy`, `medium`, or `hard`.")
+        return await message.reply_text("❌ Valid difficulties: `easy`, `medium`, `hard`.")
 
     if len(new_word) < 3:
         return await message.reply_text("❌ Word bohot chhota hai.")
 
     if new_word in WORDS[difficulty]:
-        return await message.reply_text("⚠️ Yeh word already bank me exist karta hai.")
+        return await message.reply_text("⚠️ Yeh word already database mein available hai.")
 
     WORDS[difficulty].append(new_word)
-    await message.reply_text(f"✅ Word **'{new_word.upper()}'** added to **{difficulty.upper()}** bank!")
+    DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, new_word))
+    DB.commit()
+
+    await message.reply_text(f"✅ Word **'{new_word.upper()}'** successfully added to **{difficulty.upper()}** bank!")
+
+@app.on_message(filters.command("delword"))
+async def delword_cmd(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Aap authorized nahi hain.")
+
+    if len(message.command) < 3:
+        return await message.reply_text("Usage:\n`/delword easy apple`\n`/delword medium computer`\n`/delword hard international`")
+
+    difficulty = message.command[1].lower()
+    word_to_del = clean_answer(message.command[2])
+
+    if difficulty not in WORDS:
+        return await message.reply_text("❌ Valid difficulties: `easy`, `medium`, `hard`.")
+
+    if word_to_del not in WORDS[difficulty]:
+        return await message.reply_text(f"❌ Word **'{word_to_del.upper()}'** {difficulty.upper()} bank mein nahi mila.")
+
+    WORDS[difficulty].remove(word_to_del)
+    DB.execute("DELETE FROM custom_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
+    DB.execute("DELETE FROM used_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
+    DB.commit()
+
+    await message.reply_text(f"🗑️ Word **'{word_to_del.upper()}'** successfully deleted from **{difficulty.upper()}** bank!")
+
+@app.on_message(filters.command(["word", "words"]))
+async def words_menu_cmd(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Aap authorized nahi hain.")
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"🟢 Easy ({len(WORDS['easy'])})", callback_data="view_words_easy"),
+            InlineKeyboardButton(f"🟡 Medium ({len(WORDS['medium'])})", callback_data="view_words_medium"),
+            InlineKeyboardButton(f"🔴 Hard ({len(WORDS['hard'])})", callback_data="view_words_hard")
+        ],
+        [
+            InlineKeyboardButton("❌ Close", callback_data="close_panel")
+        ]
+    ])
+
+    await message.reply_text(
+        "📚 **JUMBLE WORD BANK**\n\n"
+        f"🟢 **Easy Words:** `{len(WORDS['easy'])}`\n"
+        f"🟡 **Medium Words:** `{len(WORDS['medium'])}`\n"
+        f"🔴 **Hard Words:** `{len(WORDS['hard'])}`\n\n"
+        "Neeche buttons par click karke category ke words check karein:",
+        reply_markup=kb
+    )
+
+# ============================================================
+# ADMIN & GAME COMMANDS
+# ============================================================
 
 @app.on_message(filters.command("settings"))
 async def settings_cmd(_, message: Message):
@@ -710,7 +886,7 @@ async def leaderboard_cmd(_, message: Message):
 @app.on_message(filters.command("setpoints"))
 async def set_points(_, message: Message):
     if not is_owner(message.from_user.id):
-        return await message.reply_text("❌ Owner only command.")
+        return await message.reply_text("❌ Sirf Owner points reward change kar sakta hai.")
 
     if len(message.command) != 2:
         return await message.reply_text("Usage: `/setpoints 20`")
@@ -737,7 +913,8 @@ async def set_points(_, message: Message):
     filters.text &
     ~filters.command([
         "start", "help", "jumble", "stats", "leaderboard",
-        "rapido", "settings", "setpoints", "addword"
+        "rapido", "settings", "setpoints", "addword", "delword",
+        "word", "words", "auth", "unauth", "authlist"
     ])
 )
 async def unified_answer_handler(_, message: Message):
@@ -756,7 +933,8 @@ async def unified_answer_handler(_, message: Message):
                 return
 
             if time.time() <= game["expires"] and cleaned_input == clean_answer(game["word"]):
-                if game.get("task") and not game["task"].done():
+                curr = asyncio.current_task()
+                if game.get("task") and game["task"] is not curr and not game["task"].done():
                     try:
                         game["task"].cancel()
                     except Exception:
@@ -768,7 +946,7 @@ async def unified_answer_handler(_, message: Message):
                     f"🏆 Round Score: {game['scores'][user_id]}"
                 )
                 await asyncio.sleep(2.5)
-                await rapido_next(chat_id)
+                asyncio.create_task(rapido_next(chat_id))
                 return
         return
 
@@ -810,7 +988,7 @@ async def unified_answer_handler(_, message: Message):
         await asyncio.sleep(3)
         s = get_settings(chat_id)
         if chat_id not in RAPIDO and s["is_active"]:
-            await start_game(chat_id, game["difficulty"], chat_id)
+            asyncio.create_task(start_game(chat_id, game["difficulty"], chat_id))
 
 # ============================================================
 # CALLBACK QUERIES
@@ -880,6 +1058,65 @@ async def callback_router(_, query: CallbackQuery):
 
         return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {3 - p_hint['count']}/3", show_alert=True)
 
+    # Word Bank Viewer
+    elif data.startswith("view_words_"):
+        if not is_authed(user_id):
+            return await query.answer("❌ Sirf Auth Users word bank dekh sakte hain.", show_alert=True)
+
+        diff = data.split("_")[2]
+        word_list = WORDS.get(diff, [])
+        sample_words = ", ".join(sorted(w.upper() for w in word_list[:40]))
+        total_count = len(word_list)
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🟢 Easy", callback_data="view_words_easy"),
+                InlineKeyboardButton("🟡 Medium", callback_data="view_words_medium"),
+                InlineKeyboardButton("🔴 Hard", callback_data="view_words_hard")
+            ],
+            [
+                InlineKeyboardButton("🔙 Back to Bank", callback_data="back_to_words_menu"),
+                InlineKeyboardButton("❌ Close", callback_data="close_panel")
+            ]
+        ])
+
+        msg = (
+            f"📚 **Category: {diff.upper()} ({total_count} Total)**\n\n"
+            f"**Words Preview:**\n`{sample_words}`\n\n"
+            f"➕ Add: `/addword {diff} <word>`\n"
+            f"➖ Del: `/delword {diff} <word>`"
+        )
+        try:
+            await query.message.edit_text(msg, reply_markup=kb)
+        except MessageNotModified:
+            pass
+
+    elif data == "back_to_words_menu":
+        if not is_authed(user_id):
+            return await query.answer("❌ Authorized users only.", show_alert=True)
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"🟢 Easy ({len(WORDS['easy'])})", callback_data="view_words_easy"),
+                InlineKeyboardButton(f"🟡 Medium ({len(WORDS['medium'])})", callback_data="view_words_medium"),
+                InlineKeyboardButton(f"🔴 Hard ({len(WORDS['hard'])})", callback_data="view_words_hard")
+            ],
+            [
+                InlineKeyboardButton("❌ Close", callback_data="close_panel")
+            ]
+        ])
+        try:
+            await query.message.edit_text(
+                "📚 **JUMBLE WORD BANK**\n\n"
+                f"🟢 **Easy Words:** `{len(WORDS['easy'])}`\n"
+                f"🟡 **Medium Words:** `{len(WORDS['medium'])}`\n"
+                f"🔴 **Hard Words:** `{len(WORDS['hard'])}`\n\n"
+                "Neeche buttons par click karke category ke words check karein:",
+                reply_markup=kb
+            )
+        except MessageNotModified:
+            pass
+
     # Rapido Setup Selection
     elif data.startswith("r_"):
         lobby = RAPIDO_LOBBY.get(chat_id)
@@ -910,7 +1147,7 @@ async def callback_router(_, query: CallbackQuery):
             del RAPIDO_LOBBY[chat_id]
             await query.message.delete()
             await query.answer("🚀 Starting Match!")
-            await rapido_next(chat_id)
+            asyncio.create_task(rapido_next(chat_id))
             return
 
         kb = InlineKeyboardMarkup([
@@ -950,7 +1187,7 @@ async def callback_router(_, query: CallbackQuery):
             await query.answer("▶️ Game started!")
             await show_settings_panel(query.message, chat_id)
             s = get_settings(chat_id)
-            await start_game(chat_id, s["default_diff"], query.message)
+            asyncio.create_task(start_game(chat_id, s["default_diff"], query.message))
 
         elif data == "set_stop_game":
             DB.execute("UPDATE settings SET is_active=0 WHERE chat_id=?", (chat_id,))
@@ -1026,7 +1263,7 @@ async def callback_router(_, query: CallbackQuery):
         await asyncio.sleep(3)
         s = get_settings(chat_id)
         if s["is_active"]:
-            await start_game(chat_id, game["difficulty"], chat_id)
+            asyncio.create_task(start_game(chat_id, game["difficulty"], chat_id))
 
     elif data == "newword":
         old = DB.execute("SELECT * FROM games WHERE chat_id=?", (chat_id,)).fetchone()
@@ -1036,7 +1273,7 @@ async def callback_router(_, query: CallbackQuery):
         s = get_settings(chat_id)
         difficulty = old["difficulty"] if old else s["default_diff"]
         await query.answer("🧩 Starting new puzzle...")
-        await start_game(chat_id, difficulty, query.message)
+        asyncio.create_task(start_game(chat_id, difficulty, query.message))
 
     elif data == "close_panel":
         await query.message.delete()
