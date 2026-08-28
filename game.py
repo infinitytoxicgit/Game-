@@ -115,12 +115,6 @@ CREATE TABLE IF NOT EXISTS settings (
     easy INTEGER DEFAULT 120,
     medium INTEGER DEFAULT 300,
     hard INTEGER DEFAULT 600,
-    points_easy INTEGER DEFAULT 10,
-    points_medium INTEGER DEFAULT 20,
-    points_hard INTEGER DEFAULT 30,
-    hints_easy INTEGER DEFAULT 3,
-    hints_medium INTEGER DEFAULT 3,
-    hints_hard INTEGER DEFAULT 3,
     default_diff TEXT DEFAULT 'medium',
     is_active INTEGER DEFAULT 1,
     auto_delete INTEGER DEFAULT 0
@@ -176,21 +170,23 @@ CREATE TABLE IF NOT EXISTS score_history (
 DB.commit()
 
 def run_migrations():
+    # Global Config Defaults
+    defaults = {
+        "points_easy": 10,
+        "points_medium": 20,
+        "points_hard": 30,
+        "hints_easy": 3,
+        "hints_medium": 3,
+        "hints_hard": 3,
+        "daily_points": 50,
+        "bonus_points": 100
+    }
+    for k, v in defaults.items():
+        DB.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES (?, ?)", (k, v))
+
     cols = [c[1] for c in DB.execute("PRAGMA table_info(settings)").fetchall()]
     if "default_diff" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN default_diff TEXT DEFAULT 'medium'")
-    if "points_easy" not in cols:
-        DB.execute("ALTER TABLE settings ADD COLUMN points_easy INTEGER DEFAULT 10")
-    if "points_medium" not in cols:
-        DB.execute("ALTER TABLE settings ADD COLUMN points_medium INTEGER DEFAULT 20")
-    if "points_hard" not in cols:
-        DB.execute("ALTER TABLE settings ADD COLUMN points_hard INTEGER DEFAULT 30")
-    if "hints_easy" not in cols:
-        DB.execute("ALTER TABLE settings ADD COLUMN hints_easy INTEGER DEFAULT 3")
-    if "hints_medium" not in cols:
-        DB.execute("ALTER TABLE settings ADD COLUMN hints_medium INTEGER DEFAULT 3")
-    if "hints_hard" not in cols:
-        DB.execute("ALTER TABLE settings ADD COLUMN hints_hard INTEGER DEFAULT 3")
     if "is_active" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN is_active INTEGER DEFAULT 1")
     if "auto_delete" not in cols:
@@ -206,9 +202,6 @@ def run_migrations():
     if "last_daily" not in user_cols:
         DB.execute("ALTER TABLE users ADD COLUMN last_daily REAL DEFAULT 0")
 
-    # Bot Global Config Defaults
-    DB.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES ('daily_points', 50)")
-    DB.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES ('bonus_points', 100)")
     DB.commit()
 
 run_migrations()
@@ -284,8 +277,8 @@ def get_settings(chat_id):
     row = DB.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     if not row:
         DB.execute("""
-            INSERT INTO settings(chat_id, easy, medium, hard, points_easy, points_medium, points_hard, hints_easy, hints_medium, hints_hard, default_diff, is_active, auto_delete)
-            VALUES (?, 120, 300, 600, 10, 20, 30, 3, 3, 3, 'medium', 1, 0)
+            INSERT INTO settings(chat_id, easy, medium, hard, default_diff, is_active, auto_delete)
+            VALUES (?, 120, 300, 600, 'medium', 1, 0)
             ON CONFLICT(chat_id) DO NOTHING
         """, (chat_id,))
         DB.commit()
@@ -442,8 +435,8 @@ async def start_game(chat_id, difficulty, message_or_chat):
     puzzle_id = random.randint(10000, 99999)
     now = time.time()
     timer_val = settings[difficulty]
-    reward_pts = settings[f"points_{difficulty}"]
-    hint_limit = settings[f"hints_{difficulty}"]
+    reward_pts = get_global_config(f"points_{difficulty}", 10)
+    hint_limit = get_global_config(f"hints_{difficulty}", 3)
     expires = now + timer_val
 
     DB.execute("""
@@ -708,13 +701,13 @@ async def help_cmd(_, message: Message):
     )
     if is_user_auth:
         text += (
-            "🔐 <b>Auth / Word Bank Commands:</b>\n"
+            "🔐 <b>Auth / Word Bank Commands (Global Effect):</b>\n"
             "• <code>/word</code> — View categorized word bank (with Pagination)\n"
             "• <code>/word easy cat dog bird tree</code> — Bulk add words directly\n"
             "• <code>/addword easy apple banana</code> — Add single/multiple words\n"
             "• <code>/delword easy word</code> — Delete word from bank\n"
-            "• <code>/setpoints [easy|med|hard] [pts]</code> — Set category points\n"
-            "• <code>/sethint [easy|med|hard] [hints]</code> — Set category hints\n"
+            "• <code>/setpoints [easy|med|hard] [pts]</code> — Set GLOBAL points for all chats\n"
+            "• <code>/sethint [easy|med|hard] [hints]</code> — Set GLOBAL hints for all chats\n"
             "• <code>/setdaily [points]</code> — Set daily claim reward\n"
             "• <code>/setbonus [points]</code> — Set group bonus reward\n"
             "• <code>/update</code> — Git stash, pull & Auto-resume all groups\n"
@@ -727,6 +720,92 @@ async def help_cmd(_, message: Message):
             "• <code>/authlist</code> — List of authorized users\n"
         )
     await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+# ============================================================
+# GLOBAL SETTINGS (SETPOINTS & SETHINTS GLOBALLY)
+# ============================================================
+
+@app.on_message(filters.command("setpoints"))
+async def set_points_global(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Auth users global points set kar sakte hain.")
+
+    args = message.command[1:]
+
+    if len(args) == 1:
+        try:
+            pts = int(args[0])
+        except ValueError:
+            return await message.reply_text("❌ Invalid points number.")
+        
+        set_global_config("points_easy", pts)
+        set_global_config("points_medium", pts)
+        set_global_config("points_hard", pts)
+        return await message.reply_text(f"🌍 <b>GLOBAL SETTING UPDATED!</b>\n\nSabhi groups aur chats ke liye Easy, Medium, aur Hard reward <b>{pts} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
+
+    elif len(args) == 2:
+        category = args[0].lower()
+        if category not in ("easy", "medium", "hard"):
+            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
+
+        try:
+            pts = int(args[1])
+        except ValueError:
+            return await message.reply_text("❌ Invalid points number.")
+
+        set_global_config(f"points_{category}", pts)
+        return await message.reply_text(f"🌍 <b>GLOBAL SETTING UPDATED!</b>\n\nSabhi groups aur chats ke liye <b>{category.title()}</b> reward <b>{pts} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
+
+    else:
+        return await message.reply_text(
+            "<b>Global Usage:</b>\n"
+            "• <code>/setpoints 20</code> — Sabhi categories ke liye globally\n"
+            "• <code>/setpoints easy 10</code> — Sirf Easy ke liye globally\n"
+            "• <code>/setpoints medium 25</code> — Sirf Medium ke liye globally\n"
+            "• <code>/setpoints hard 50</code> — Sirf Hard ke liye globally",
+            parse_mode=ParseMode.HTML
+        )
+
+@app.on_message(filters.command("sethint"))
+async def sethint_global(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Auth users global hints set kar sakte hain.")
+
+    args = message.command[1:]
+
+    if len(args) == 1:
+        try:
+            h = int(args[0])
+        except ValueError:
+            return await message.reply_text("❌ Invalid hint number.")
+
+        set_global_config("hints_easy", h)
+        set_global_config("hints_medium", h)
+        set_global_config("hints_hard", h)
+        return await message.reply_text(f"🌍 <b>GLOBAL SETTING UPDATED!</b>\n\nSabhi groups aur chats ke liye hints limit <b>{h} hints/word</b> set kar di gayi.", parse_mode=ParseMode.HTML)
+
+    elif len(args) == 2:
+        category = args[0].lower()
+        if category not in ("easy", "medium", "hard"):
+            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
+
+        try:
+            h = int(args[1])
+        except ValueError:
+            return await message.reply_text("❌ Invalid hint number.")
+
+        set_global_config(f"hints_{category}", h)
+        return await message.reply_text(f"🌍 <b>GLOBAL SETTING UPDATED!</b>\n\nSabhi groups aur chats ke liye <b>{category.title()}</b> hints limit <b>{h} hints/word</b> set kar di gayi.", parse_mode=ParseMode.HTML)
+
+    else:
+        return await message.reply_text(
+            "<b>Global Usage:</b>\n"
+            "• <code>/sethint 3</code> — Sabhi categories ke liye globally\n"
+            "• <code>/sethint easy 5</code> — Sirf Easy ke liye globally\n"
+            "• <code>/sethint medium 3</code> — Sirf Medium ke liye globally\n"
+            "• <code>/sethint hard 2</code> — Sirf Hard ke liye globally",
+            parse_mode=ParseMode.HTML
+        )
 
 # ============================================================
 # DAILY & GROUP BONUS CLAIM SYSTEM
@@ -773,7 +852,7 @@ async def daily_cmd(_, message: Message):
     u = get_user(message.from_user.id)
     now = time.time()
     last = u["last_daily"] or 0
-    cooldown = 86400  # 24 Hours
+    cooldown = 86400
 
     if now - last < cooldown:
         rem = int(cooldown - (now - last))
@@ -810,7 +889,6 @@ async def bonus_cmd(_, message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
 
-    # 1. Check if Bot is Admin
     try:
         bot_member = await message.chat.get_member("me")
         if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
@@ -818,7 +896,6 @@ async def bonus_cmd(_, message: Message):
     except Exception:
         return await message.reply_text("❌ Bot ke permissions verify nahi ho sake. Kripya bot ko Admin banayein.")
 
-    # 2. Check if already claimed for this group
     claimed = DB.execute("SELECT * FROM group_bonus WHERE user_id=? AND chat_id=?", (user_id, chat_id)).fetchone()
     if claimed:
         return await message.reply_text("⚠️ Aapne is group ke liye bonus pehle hi claim kar liya hai!")
@@ -1056,7 +1133,6 @@ async def words_menu_cmd(_, message: Message):
     if not is_authed(message.from_user.id):
         return await message.reply_text("❌ Aap authorized nahi hain.")
 
-    # Agar /word ke sath category aur words diye hain toh bulk add karega
     if len(message.command) >= 3 and message.command[1].lower() in WORDS:
         diff = message.command[1].lower()
         raw_words = message.text.split(None, 2)[2].replace(",", " ").split()
@@ -1096,102 +1172,8 @@ async def words_menu_cmd(_, message: Message):
     asyncio.create_task(delete_after(message, 3))
 
 # ============================================================
-# GAME & SETTINGS COMMANDS
+# SETTINGS PANEL
 # ============================================================
-
-@app.on_message(filters.command("sethint"))
-async def sethint_cmd(_, message: Message):
-    if not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Sirf Owner aur Auth users hints limit set kar sakte hain.")
-
-    args = message.command[1:]
-    get_settings(message.chat.id)
-
-    if len(args) == 1:
-        try:
-            h = int(args[0])
-        except ValueError:
-            return await message.reply_text("❌ Invalid hint number.")
-
-        DB.execute("""
-            UPDATE settings
-            SET hints_easy=?, hints_medium=?, hints_hard=?
-            WHERE chat_id=?
-        """, (h, h, h, message.chat.id))
-        DB.commit()
-        return await message.reply_text(f"✅ Sabhi categories (Easy, Medium, Hard) ke liye hints limit <b>{h} hints/word</b> set kar di gayi.", parse_mode=ParseMode.HTML)
-
-    elif len(args) == 2:
-        category = args[0].lower()
-        if category not in ("easy", "medium", "hard"):
-            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
-
-        try:
-            h = int(args[1])
-        except ValueError:
-            return await message.reply_text("❌ Invalid hint number.")
-
-        col = f"hints_{category}"
-        DB.execute(f"UPDATE settings SET {col}=? WHERE chat_id=?", (h, message.chat.id))
-        DB.commit()
-        return await message.reply_text(f"✅ <b>{category.title()}</b> category ke liye hints limit <b>{h} hints/word</b> set kar di gayi.", parse_mode=ParseMode.HTML)
-
-    else:
-        return await message.reply_text(
-            "<b>Usage:</b>\n"
-            "• <code>/sethint 3</code> — Sabhi categories ke liye\n"
-            "• <code>/sethint easy 5</code> — Sirf Easy ke liye\n"
-            "• <code>/sethint medium 3</code> — Sirf Medium ke liye\n"
-            "• <code>/sethint hard 2</code> — Sirf Hard ke liye",
-            parse_mode=ParseMode.HTML
-        )
-
-@app.on_message(filters.command("setpoints"))
-async def set_points(_, message: Message):
-    if not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Sirf Owner aur Auth users points reward change kar sakte hain.")
-
-    args = message.command[1:]
-    get_settings(message.chat.id)
-
-    if len(args) == 1:
-        try:
-            pts = int(args[0])
-        except ValueError:
-            return await message.reply_text("❌ Invalid points number.")
-        
-        DB.execute("""
-            UPDATE settings 
-            SET points_easy=?, points_medium=?, points_hard=?
-            WHERE chat_id=?
-        """, (pts, pts, pts, message.chat.id))
-        DB.commit()
-        return await message.reply_text(f"✅ Sabhi categories (Easy, Medium, Hard) ke liye reward <b>{pts} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
-
-    elif len(args) == 2:
-        category = args[0].lower()
-        if category not in ("easy", "medium", "hard"):
-            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
-
-        try:
-            pts = int(args[1])
-        except ValueError:
-            return await message.reply_text("❌ Invalid points number.")
-
-        col = f"points_{category}"
-        DB.execute(f"UPDATE settings SET {col}=? WHERE chat_id=?", (pts, message.chat.id))
-        DB.commit()
-        return await message.reply_text(f"✅ <b>{category.title()}</b> category ke liye reward <b>{pts} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
-
-    else:
-        return await message.reply_text(
-            "<b>Usage:</b>\n"
-            "• <code>/setpoints 20</code> — Sabhi categories ke liye\n"
-            "• <code>/setpoints easy 10</code> — Sirf Easy ke liye\n"
-            "• <code>/setpoints medium 25</code> — Sirf Medium ke liye\n"
-            "• <code>/setpoints hard 50</code> — Sirf Hard ke liye",
-            parse_mode=ParseMode.HTML
-        )
 
 @app.on_message(filters.command("settings"))
 async def settings_cmd(_, message: Message):
@@ -1202,6 +1184,14 @@ async def settings_cmd(_, message: Message):
     cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
     status_btn = InlineKeyboardButton("⏹️ Stop Game", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ Start Game", callback_data="set_start_game")
     del_btn = InlineKeyboardButton("🗑️ Auto-Del: ON", callback_data="set_toggle_autodel") if s["auto_delete"] else InlineKeyboardButton("🗑️ Auto-Del: OFF", callback_data="set_toggle_autodel")
+
+    p_easy = get_global_config("points_easy", 10)
+    p_med = get_global_config("points_medium", 20)
+    p_hard = get_global_config("points_hard", 30)
+
+    h_easy = get_global_config("hints_easy", 3)
+    h_med = get_global_config("hints_medium", 3)
+    h_hard = get_global_config("hints_hard", 3)
 
     kb = InlineKeyboardMarkup([
         [
@@ -1221,9 +1211,9 @@ async def settings_cmd(_, message: Message):
         f"🟢 Game Status: <b>{'Running' if s['is_active'] else 'Stopped'}</b>\n"
         f"🗑️ Auto Delete Old: <b>{'Enabled' if s['auto_delete'] else 'Disabled'}</b>\n"
         f"🎯 Default Mode: <b>{str(cur_diff).title()}</b>\n"
-        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
-        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>\n"
-        f"💡 Hints Limit: Easy: <b>{s['hints_easy']}</b> | Med: <b>{s['hints_medium']}</b> | Hard: <b>{s['hints_hard']}</b>",
+        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n\n"
+        f"🌍 <b>Global Rewards:</b> Easy: <b>{p_easy}pts</b> | Med: <b>{p_med}pts</b> | Hard: <b>{p_hard}pts</b>\n"
+        f"💡 <b>Global Hints:</b> Easy: <b>{h_easy}</b> | Med: <b>{h_med}</b> | Hard: <b>{h_hard}</b>",
         reply_markup=kb,
         parse_mode=ParseMode.HTML
     )
@@ -1513,7 +1503,7 @@ async def unified_answer_handler(_, message: Message):
         ensure_user(message.from_user)
         u = get_user(user_id)
         settings = get_settings(chat_id)
-        pts_reward = settings[f"points_{game['difficulty']}"]
+        pts_reward = get_global_config(f"points_{game['difficulty']}", 10)
 
         new_streak = u["streak"] + 1
         best = max(new_streak, u["best_streak"])
@@ -1574,8 +1564,7 @@ async def callback_router(_, query: CallbackQuery):
         word = game["word"]
         difficulty = game["difficulty"]
 
-        settings = get_settings(chat_id)
-        hint_limit = settings[f"hints_{difficulty}"]
+        hint_limit = get_global_config(f"hints_{difficulty}", 3)
 
         hint_row = DB.execute("SELECT * FROM puzzle_hints WHERE chat_id=? AND puzzle_id=? AND user_id=?", (chat_id, puzzle_id, user_id)).fetchone()
         hints_used = hint_row["hints_used"] if hint_row else 0
@@ -1610,8 +1599,7 @@ async def callback_router(_, query: CallbackQuery):
             return await query.answer("❌ Sirf match players hints le sakte hain.", show_alert=True)
 
         difficulty = game["difficulty"]
-        settings = get_settings(chat_id)
-        hint_limit = settings[f"hints_{difficulty}"]
+        hint_limit = get_global_config(f"hints_{difficulty}", 3)
 
         p_hint = game["round_hints"][user_id]
         if p_hint["count"] >= hint_limit:
@@ -1953,6 +1941,14 @@ async def show_settings_panel(message_obj, chat_id):
     status_btn = InlineKeyboardButton("⏹️ Stop Game", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ Start Game", callback_data="set_start_game")
     del_btn = InlineKeyboardButton("🗑️ Auto-Del: ON", callback_data="set_toggle_autodel") if s["auto_delete"] else InlineKeyboardButton("🗑️ Auto-Del: OFF", callback_data="set_toggle_autodel")
 
+    p_easy = get_global_config("points_easy", 10)
+    p_med = get_global_config("points_medium", 20)
+    p_hard = get_global_config("points_hard", 30)
+
+    h_easy = get_global_config("hints_easy", 3)
+    h_med = get_global_config("hints_medium", 3)
+    h_hard = get_global_config("hints_hard", 3)
+
     kb = InlineKeyboardMarkup([
         [
             status_btn,
@@ -1971,9 +1967,9 @@ async def show_settings_panel(message_obj, chat_id):
         f"🟢 Game Status: <b>{'Running' if s['is_active'] else 'Stopped'}</b>\n"
         f"🗑️ Auto Delete Old: <b>{'Enabled' if s['auto_delete'] else 'Disabled'}</b>\n"
         f"🎯 Default Mode: <b>{str(cur_diff).title()}</b>\n"
-        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
-        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>\n"
-        f"💡 Hints Limit: Easy: <b>{s['hints_easy']}</b> | Med: <b>{s['hints_medium']}</b> | Hard: <b>{s['hints_hard']}</b>"
+        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n\n"
+        f"🌍 <b>Global Rewards:</b> Easy: <b>{p_easy}pts</b> | Med: <b>{p_med}pts</b> | Hard: <b>{p_hard}pts</b>\n"
+        f"💡 <b>Global Hints:</b> Easy: <b>{h_easy}</b> | Med: <b>{h_med}</b> | Hard: <b>{h_hard}</b>"
     )
     try:
         await message_obj.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -2003,7 +1999,7 @@ async def resume_all_active_games():
 
 async def main():
     await app.start()
-    print("🚀 Jumble Fight & Jumble Bot Started Successfully!")
+    print("🚀 Jumble Fight & Jumble Bot Started Successfully (with Global Points & Hints)!")
     asyncio.create_task(resume_all_active_games())
     await asyncio.Event().wait()
 
