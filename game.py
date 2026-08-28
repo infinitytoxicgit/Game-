@@ -117,6 +117,9 @@ CREATE TABLE IF NOT EXISTS settings (
     points_easy INTEGER DEFAULT 10,
     points_medium INTEGER DEFAULT 20,
     points_hard INTEGER DEFAULT 30,
+    hints_easy INTEGER DEFAULT 3,
+    hints_medium INTEGER DEFAULT 3,
+    hints_hard INTEGER DEFAULT 3,
     default_diff TEXT DEFAULT 'medium',
     is_active INTEGER DEFAULT 1,
     auto_delete INTEGER DEFAULT 0
@@ -169,6 +172,12 @@ def run_migrations():
         DB.execute("ALTER TABLE settings ADD COLUMN points_medium INTEGER DEFAULT 20")
     if "points_hard" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN points_hard INTEGER DEFAULT 30")
+    if "hints_easy" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN hints_easy INTEGER DEFAULT 3")
+    if "hints_medium" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN hints_medium INTEGER DEFAULT 3")
+    if "hints_hard" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN hints_hard INTEGER DEFAULT 3")
     if "is_active" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN is_active INTEGER DEFAULT 1")
     if "auto_delete" not in cols:
@@ -245,8 +254,8 @@ def get_settings(chat_id):
     row = DB.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     if not row:
         DB.execute("""
-            INSERT INTO settings(chat_id, easy, medium, hard, points_easy, points_medium, points_hard, default_diff, is_active, auto_delete)
-            VALUES (?, 120, 300, 600, 10, 20, 30, 'medium', 1, 0)
+            INSERT INTO settings(chat_id, easy, medium, hard, points_easy, points_medium, points_hard, hints_easy, hints_medium, hints_hard, default_diff, is_active, auto_delete)
+            VALUES (?, 120, 300, 600, 10, 20, 30, 3, 3, 3, 'medium', 1, 0)
             ON CONFLICT(chat_id) DO NOTHING
         """, (chat_id,))
         DB.commit()
@@ -376,7 +385,7 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
 def normal_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💡 Hint (3/word)", callback_data="hint"),
+            InlineKeyboardButton("💡 Hint", callback_data="hint"),
             InlineKeyboardButton("⏭️ Skip", callback_data="skip")
         ],
         [
@@ -404,6 +413,7 @@ async def start_game(chat_id, difficulty, message_or_chat):
     now = time.time()
     timer_val = settings[difficulty]
     reward_pts = settings[f"points_{difficulty}"]
+    hint_limit = settings[f"hints_{difficulty}"]
     expires = now + timer_val
 
     DB.execute("""
@@ -417,7 +427,7 @@ async def start_game(chat_id, difficulty, message_or_chat):
         f"🧩 <b>Jumble #{puzzle_id}</b>\n\n"
         f"🎯 Difficulty: <b>{difficulty.title()}</b>\n"
         f"⏱️ Time: <b>{timer_val // 60} min {timer_val % 60} sec</b>\n"
-        f"⭐ Reward: <b>+{reward_pts} Points</b>\n\n"
+        f"⭐ Reward: <b>+{reward_pts} Points</b> | 💡 Hints: <b>{hint_limit}/word</b>\n\n"
         f"🔀 Unscramble the letters!\n"
         f"💬 Type your answer in the chat."
     )
@@ -482,7 +492,7 @@ FIGHT_LOBBY = {}
 def fight_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💡 Hint (3/word)", callback_data="fight_hint")
+            InlineKeyboardButton("💡 Hint", callback_data="fight_hint")
         ]
     ])
 
@@ -660,23 +670,24 @@ async def help_cmd(_, message: Message):
         "<code>/stats</code> — Personal score card\n"
         "<code>/private</code> — Hide tag & ID from leaderboard\n"
         "<code>/public</code> — Show tag & ID on leaderboard\n\n"
-        "💡 Har word par aapko <b>3 fresh hints</b> milti hain.\n"
     )
     if is_user_auth:
         text += (
-            "\n🔐 <b>Auth / Word Bank Commands:</b>\n"
-            "<code>/word</code> — View categorized word bank (with Pagination & Single-tap copy)\n"
-            "<code>/addword easy word</code> — Add new word to bank\n"
-            "<code>/delword easy word</code> — Delete word from bank\n"
-            "<code>/setpoints [easy|medium|hard] [points]</code> — Set category points\n"
-            "<code>/update</code> — Update bot from GitHub repository\n"
+            "🔐 <b>Auth / Word Bank Commands:</b>\n"
+            "• <code>/word</code> — View categorized word bank (with Pagination)\n"
+            "• <code>/word easy cat dog bird tree</code> — Bulk add words directly\n"
+            "• <code>/addword easy apple banana</code> — Add single/multiple words\n"
+            "• <code>/delword easy word</code> — Delete word from bank\n"
+            "• <code>/setpoints [easy|med|hard] [pts]</code> — Set category points\n"
+            "• <code>/sethint [easy|med|hard] [hints]</code> — Set category hints\n"
+            "• <code>/update</code> — Git stash, pull & Auto-resume all groups\n"
         )
     if is_owner(message.from_user.id):
         text += (
             "\n👑 <b>Owner Commands:</b>\n"
-            "<code>/auth @user</code> — Grant auth access\n"
-            "<code>/unauth @user</code> — Revoke auth access\n"
-            "<code>/authlist</code> — List of authorized users\n"
+            "• <code>/auth @user</code> — Grant auth access\n"
+            "• <code>/unauth @user</code> — Revoke auth access\n"
+            "• <code>/authlist</code> — List of authorized users\n"
         )
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -725,7 +736,7 @@ async def update_bot_cmd(_, message: Message):
         pull_res = subprocess.run(["git", "pull"], check=True, capture_output=True, text=True)
         out = pull_res.stdout or "Updated successfully."
         
-        await msg.edit_text(f"✅ <b>Git Pull Output:</b>\n<code>{out[:500]}</code>\n\n🚀 <b>Restarting bot instance...</b>", parse_mode=ParseMode.HTML)
+        await msg.edit_text(f"✅ <b>Git Pull Output:</b>\n<code>{out[:500]}</code>\n\n🚀 <b>Restarting & Auto-resuming all active group games...</b>", parse_mode=ParseMode.HTML)
         await asyncio.sleep(1.5)
         os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
@@ -815,8 +826,23 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# WORD BANK MANAGEMENT
+# WORD BANK MANAGEMENT (SINGLE / BULK ADDITION SUPPORT)
 # ============================================================
+
+def handle_bulk_add_words(difficulty, raw_words_list):
+    added = []
+    skipped = []
+    for raw in raw_words_list:
+        w = clean_answer(raw)
+        if len(w) >= 3:
+            if w not in WORDS[difficulty]:
+                WORDS[difficulty].append(w)
+                DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, w))
+                added.append(w)
+            else:
+                skipped.append(w)
+    DB.commit()
+    return added, skipped
 
 @app.on_message(filters.command("addword"))
 async def addword_cmd(_, message: Message):
@@ -824,28 +850,20 @@ async def addword_cmd(_, message: Message):
         return await message.reply_text("❌ Aap authorized nahi hain.")
 
     if len(message.command) < 3:
-        return await message.reply_text("Usage:\n<code>/addword easy apple</code>\n<code>/addword medium computer</code>\n<code>/addword hard international</code>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("Usage:\n<code>/addword easy apple banana orange</code>\n<code>/addword medium computer network</code>\n<code>/addword hard international transformation</code>", parse_mode=ParseMode.HTML)
 
     difficulty = message.command[1].lower()
-    new_word = clean_answer(message.command[2])
-
     if difficulty not in WORDS:
         return await message.reply_text("❌ Valid difficulties: <code>easy</code>, <code>medium</code>, <code>hard</code>.", parse_mode=ParseMode.HTML)
 
-    if len(new_word) < 3:
-        return await message.reply_text("❌ Word bohot chhota hai.")
+    raw_words = message.text.split(None, 2)[2].replace(",", " ").split()
+    added, skipped = handle_bulk_add_words(difficulty, raw_words)
 
-    if new_word in WORDS[difficulty]:
-        res = await message.reply_text("⚠️ Yeh word already database mein available hai.")
-        asyncio.create_task(delete_after(message, 5))
-        asyncio.create_task(delete_after(res, 5))
-        return
+    msg_text = f"✅ <b>{len(added)}</b> word(s) successfully added to <b>{difficulty.upper()}</b> bank!"
+    if skipped:
+        msg_text += f"\n⚠️ <i>{len(skipped)} word(s) already exist karte the (Skipped).</i>"
 
-    WORDS[difficulty].append(new_word)
-    DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, new_word))
-    DB.commit()
-
-    res = await message.reply_text(f"✅ Word <b>'{new_word.upper()}'</b> added to <b>{difficulty.upper()}</b> bank!", parse_mode=ParseMode.HTML)
+    res = await message.reply_text(msg_text, parse_mode=ParseMode.HTML)
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
@@ -883,6 +901,21 @@ async def words_menu_cmd(_, message: Message):
     if not is_authed(message.from_user.id):
         return await message.reply_text("❌ Aap authorized nahi hain.")
 
+    # Agar /word ke sath category aur words diye hain toh bulk add karega
+    if len(message.command) >= 3 and message.command[1].lower() in WORDS:
+        diff = message.command[1].lower()
+        raw_words = message.text.split(None, 2)[2].replace(",", " ").split()
+        added, skipped = handle_bulk_add_words(diff, raw_words)
+        
+        msg_text = f"✅ <b>{len(added)}</b> word(s) successfully added to <b>{diff.upper()}</b> bank!"
+        if skipped:
+            msg_text += f"\n⚠️ <i>{len(skipped)} word(s) already exist karte the (Skipped).</i>"
+
+        res = await message.reply_text(msg_text, parse_mode=ParseMode.HTML)
+        asyncio.create_task(delete_after(message, 5))
+        asyncio.create_task(delete_after(res, 5))
+        return
+
     kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton(f"🟢 Easy ({len(WORDS['easy'])})", callback_data="wb_easy_1"),
@@ -899,7 +932,9 @@ async def words_menu_cmd(_, message: Message):
         f"🟢 <b>Easy Words:</b> <code>{len(WORDS['easy'])}</code>\n"
         f"🟡 <b>Medium Words:</b> <code>{len(WORDS['medium'])}</code>\n"
         f"🔴 <b>Hard Words:</b> <code>{len(WORDS['hard'])}</code>\n\n"
-        "Neeche buttons par click karke category ke words check karein (Single-tap copy supported):",
+        "📌 <b>Bulk Words Add karne ke liye:</b>\n"
+        "<code>/word easy cat dog bird tree</code>\n\n"
+        "Neeche buttons par click karke category ke words check karein (Single-tap copy):",
         reply_markup=kb,
         parse_mode=ParseMode.HTML
     )
@@ -908,6 +943,53 @@ async def words_menu_cmd(_, message: Message):
 # ============================================================
 # GAME & SETTINGS COMMANDS
 # ============================================================
+
+@app.on_message(filters.command("sethint"))
+async def sethint_cmd(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Auth users hints limit set kar sakte hain.")
+
+    args = message.command[1:]
+    get_settings(message.chat.id)
+
+    if len(args) == 1:
+        try:
+            h = int(args[0])
+        except ValueError:
+            return await message.reply_text("❌ Invalid hint number.")
+
+        DB.execute("""
+            UPDATE settings
+            SET hints_easy=?, hints_medium=?, hints_hard=?
+            WHERE chat_id=?
+        """, (h, h, h, message.chat.id))
+        DB.commit()
+        return await message.reply_text(f"✅ Sabhi categories (Easy, Medium, Hard) ke liye hints limit <b>{h} hints/word</b> set kar di gayi.", parse_mode=ParseMode.HTML)
+
+    elif len(args) == 2:
+        category = args[0].lower()
+        if category not in ("easy", "medium", "hard"):
+            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
+
+        try:
+            h = int(args[1])
+        except ValueError:
+            return await message.reply_text("❌ Invalid hint number.")
+
+        col = f"hints_{category}"
+        DB.execute(f"UPDATE settings SET {col}=? WHERE chat_id=?", (h, message.chat.id))
+        DB.commit()
+        return await message.reply_text(f"✅ <b>{category.title()}</b> category ke liye hints limit <b>{h} hints/word</b> set kar di gayi.", parse_mode=ParseMode.HTML)
+
+    else:
+        return await message.reply_text(
+            "<b>Usage:</b>\n"
+            "• <code>/sethint 3</code> — Sabhi categories ke liye\n"
+            "• <code>/sethint easy 5</code> — Sirf Easy ke liye\n"
+            "• <code>/sethint medium 3</code> — Sirf Medium ke liye\n"
+            "• <code>/sethint hard 2</code> — Sirf Hard ke liye",
+            parse_mode=ParseMode.HTML
+        )
 
 @app.on_message(filters.command("setpoints"))
 async def set_points(_, message: Message):
@@ -985,7 +1067,8 @@ async def settings_cmd(_, message: Message):
         f"🗑️ Auto Delete Old: <b>{'Enabled' if s['auto_delete'] else 'Disabled'}</b>\n"
         f"🎯 Default Mode: <b>{str(cur_diff).title()}</b>\n"
         f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
-        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>",
+        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>\n"
+        f"💡 Hints Limit: Easy: <b>{s['hints_easy']}</b> | Med: <b>{s['hints_medium']}</b> | Hard: <b>{s['hints_hard']}</b>",
         reply_markup=kb,
         parse_mode=ParseMode.HTML
     )
@@ -1102,7 +1185,6 @@ async def stats_cmd(_, message: Message):
         f"⭐ Points: <b>{u['points']}</b>\n"
         f"🧩 Solved: <b>{u['solved']}</b>\n"
         f"🔥 Streak: <b>{u['streak']}</b> (Best: {u['best_streak']})\n"
-        f"💡 Hints: <b>3 per puzzle</b>\n"
         f"🛡️ Privacy: <b>{priv_status}</b>\n\n"
         f"⚔️ Jumble Fight: <b>{u['fight_wins']}W - {u['fight_losses']}L</b>\n"
         f"📈 Win Rate: <b>{winrate:.1f}%</b>",
@@ -1110,7 +1192,7 @@ async def stats_cmd(_, message: Message):
     )
 
 # ============================================================
-# DYNAMIC LEADERBOARD SYSTEM (WITH PRIVACY CHECKS)
+# DYNAMIC LEADERBOARD SYSTEM
 # ============================================================
 
 def format_lb_entry(user_id, name, username, is_private):
@@ -1165,7 +1247,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
             LIMIT 10
         """, (since,)).fetchall()
 
-    else: # global
+    else:
         title = "🌍 <b>GLOBAL ALL-TIME LEADERBOARD</b>"
         rows = DB.execute("""
             SELECT user_id, name, username, is_private, points as total_pts
@@ -1214,7 +1296,7 @@ async def leaderboard_cmd(_, message: Message):
     filters.text &
     ~filters.command([
         "start", "help", "jumble", "stats", "leaderboard", "top", "rank", "lb",
-        "jumblefight", "fight", "rapido", "settings", "setpoints", "private", "public",
+        "jumblefight", "fight", "rapido", "settings", "setpoints", "sethint", "private", "public",
         "addword", "delword", "word", "words", "auth", "unauth", "authlist", "update", "gitpull"
     ])
 )
@@ -1334,13 +1416,17 @@ async def callback_router(_, query: CallbackQuery):
         ensure_user(query.from_user)
         puzzle_id = game["puzzle_id"]
         word = game["word"]
+        difficulty = game["difficulty"]
+
+        settings = get_settings(chat_id)
+        hint_limit = settings[f"hints_{difficulty}"]
 
         hint_row = DB.execute("SELECT * FROM puzzle_hints WHERE chat_id=? AND puzzle_id=? AND user_id=?", (chat_id, puzzle_id, user_id)).fetchone()
         hints_used = hint_row["hints_used"] if hint_row else 0
         revealed_indices = [int(i) for i in hint_row["revealed_indices"].split(",") if i] if hint_row else []
 
-        if hints_used >= 3:
-            return await query.answer("❌ Is word ke liye 3 hints complete ho chuki hain!", show_alert=True)
+        if hints_used >= hint_limit:
+            return await query.answer(f"❌ Is word ke liye aapki {hint_limit} hints complete ho chuki hain!", show_alert=True)
 
         available_indices = [i for i in range(len(word)) if i not in revealed_indices]
         if not available_indices:
@@ -1360,16 +1446,20 @@ async def callback_router(_, query: CallbackQuery):
         DB.commit()
 
         letter = word[chosen_index].upper()
-        return await query.answer(f"💡 Hint: Letter #{chosen_index + 1} is '{letter}'\nRemaining: {3 - hints_used}/3", show_alert=True)
+        return await query.answer(f"💡 Hint: Letter #{chosen_index + 1} is '{letter}'\nRemaining: {hint_limit - hints_used}/{hint_limit}", show_alert=True)
 
     elif data == "fight_hint":
         game = JUMBLE_FIGHT.get(chat_id)
         if not game or user_id not in game["players"]:
             return await query.answer("❌ Sirf match players hints le sakte hain.", show_alert=True)
 
+        difficulty = game["difficulty"]
+        settings = get_settings(chat_id)
+        hint_limit = settings[f"hints_{difficulty}"]
+
         p_hint = game["round_hints"][user_id]
-        if p_hint["count"] >= 3:
-            return await query.answer("❌ Is round ke 3 hints use ho chuke hain!", show_alert=True)
+        if p_hint["count"] >= hint_limit:
+            return await query.answer(f"❌ Is round ke {hint_limit} hints use ho chuke hain!", show_alert=True)
 
         word = game["word"]
         avail = [i for i in range(len(word)) if i not in p_hint["indices"]]
@@ -1380,7 +1470,7 @@ async def callback_router(_, query: CallbackQuery):
         p_hint["indices"].append(idx)
         p_hint["count"] += 1
 
-        return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {3 - p_hint['count']}/3", show_alert=True)
+        return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {hint_limit - p_hint['count']}/{hint_limit}", show_alert=True)
 
     # ============================================================
     # LEADERBOARD CALLBACK ROUTER
@@ -1481,7 +1571,9 @@ async def callback_router(_, query: CallbackQuery):
                 f"🟢 <b>Easy Words:</b> <code>{len(WORDS['easy'])}</code>\n"
                 f"🟡 <b>Medium Words:</b> <code>{len(WORDS['medium'])}</code>\n"
                 f"🔴 <b>Hard Words:</b> <code>{len(WORDS['hard'])}</code>\n\n"
-                "Neeche buttons par click karke category ke words check karein (Single-tap copy supported):",
+                "📌 <b>Bulk Words Add karne ke liye:</b>\n"
+                "<code>/word easy cat dog bird tree</code>\n\n"
+                "Neeche buttons par click karke category ke words check karein (Single-tap copy):",
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML
             )
@@ -1724,7 +1816,8 @@ async def show_settings_panel(message_obj, chat_id):
         f"🗑️ Auto Delete Old: <b>{'Enabled' if s['auto_delete'] else 'Disabled'}</b>\n"
         f"🎯 Default Mode: <b>{str(cur_diff).title()}</b>\n"
         f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
-        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>"
+        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>\n"
+        f"💡 Hints Limit: Easy: <b>{s['hints_easy']}</b> | Med: <b>{s['hints_medium']}</b> | Hard: <b>{s['hints_hard']}</b>"
     )
     try:
         await message_obj.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -1732,9 +1825,32 @@ async def show_settings_panel(message_obj, chat_id):
         pass
 
 # ============================================================
+# AUTO-RESUME GAMES ON BOT STARTUP
+# ============================================================
+
+async def resume_all_active_games():
+    await asyncio.sleep(4)
+    rows = DB.execute("SELECT chat_id, default_diff FROM settings WHERE is_active = 1").fetchall()
+    for row in rows:
+        c_id = row["chat_id"]
+        diff = row["default_diff"] or "medium"
+        try:
+            # Agar koi existing puzzle expire ho chuka hai ya nahi hai to fresh puzzle launch karo
+            existing = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (c_id,)).fetchone()
+            if not existing or time.time() > existing["expires"]:
+                asyncio.create_task(start_game(c_id, diff, c_id))
+        except Exception as e:
+            print(f"Error resuming chat {c_id}: {e}")
+
+# ============================================================
 # RUN BOT
 # ============================================================
 
-if __name__ == "__main__":
+async def main():
+    await app.start()
     print("🚀 Jumble Fight & Jumble Bot Started Successfully!")
-    app.run()
+    asyncio.create_task(resume_all_active_games())
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.get_event_loop().run_until_complete(main())
