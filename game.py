@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS users (
     streak INTEGER DEFAULT 0,
     fight_wins INTEGER DEFAULT 0,
     fight_losses INTEGER DEFAULT 0,
-    is_private INTEGER DEFAULT 0
+    is_private INTEGER DEFAULT 0,
+    last_daily REAL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS auth_users (
@@ -123,6 +124,18 @@ CREATE TABLE IF NOT EXISTS settings (
     default_diff TEXT DEFAULT 'medium',
     is_active INTEGER DEFAULT 1,
     auto_delete INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS bot_config (
+    key TEXT PRIMARY KEY,
+    value INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS group_bonus (
+    user_id INTEGER,
+    chat_id INTEGER,
+    claimed_at REAL,
+    PRIMARY KEY(user_id, chat_id)
 );
 
 CREATE TABLE IF NOT EXISTS games (
@@ -190,6 +203,12 @@ def run_migrations():
         DB.execute("ALTER TABLE users ADD COLUMN fight_losses INTEGER DEFAULT 0")
     if "is_private" not in user_cols:
         DB.execute("ALTER TABLE users ADD COLUMN is_private INTEGER DEFAULT 0")
+    if "last_daily" not in user_cols:
+        DB.execute("ALTER TABLE users ADD COLUMN last_daily REAL DEFAULT 0")
+
+    # Bot Global Config Defaults
+    DB.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES ('daily_points', 50)")
+    DB.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES ('bonus_points', 100)")
     DB.commit()
 
 run_migrations()
@@ -238,6 +257,17 @@ def is_authed(user_id):
         return True
     row = DB.execute("SELECT user_id FROM auth_users WHERE user_id=?", (int(user_id),)).fetchone()
     return bool(row)
+
+def get_global_config(key, default_val):
+    row = DB.execute("SELECT value FROM bot_config WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default_val
+
+def set_global_config(key, val):
+    DB.execute("""
+        INSERT INTO bot_config (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (key, val))
+    DB.commit()
 
 async def is_admin_or_owner(chat, user_id):
     if is_owner(user_id):
@@ -637,6 +667,9 @@ async def start_cmd(_, message: Message):
         "• <code>/jumble</code> — Start Auto-loop Jumble Game\n"
         "• <code>/jumblefight @user</code> — 1v1 Battle Mode (with Accept Gate)\n"
         "• <code>/settings</code> — Admin Panel (Start/Stop, Mode, Auto-delete)\n\n"
+        "🎁 <b>Free Points & Rewards:</b>\n"
+        "• <code>/daily</code> — Claim daily bonus points in DM (every 24h)\n"
+        "• <code>/bonus</code> — Claim group addition bonus (when bot is added as admin)\n\n"
         "🛡️ <b>Privacy Settings:</b>\n"
         "• <code>/private</code> — Hide ID/Tag on Leaderboard (Name only)\n"
         "• <code>/public</code> — Show Tag & ID on Leaderboard\n\n"
@@ -666,6 +699,8 @@ async def help_cmd(_, message: Message):
         "<code>/jumble</code> — Start auto-looping jumble game\n"
         "<code>/jumblefight @user</code> — 1v1 battle match\n"
         "<code>/settings</code> — Admin start/stop and game settings\n"
+        "<code>/daily</code> — Claim daily points (DM only)\n"
+        "<code>/bonus</code> — Claim group admin reward (Group only)\n"
         "<code>/leaderboard</code> — Top players ranking (Daily/Weekly/Monthly/Global)\n"
         "<code>/stats</code> — Personal score card\n"
         "<code>/private</code> — Hide tag & ID from leaderboard\n"
@@ -680,6 +715,8 @@ async def help_cmd(_, message: Message):
             "• <code>/delword easy word</code> — Delete word from bank\n"
             "• <code>/setpoints [easy|med|hard] [pts]</code> — Set category points\n"
             "• <code>/sethint [easy|med|hard] [hints]</code> — Set category hints\n"
+            "• <code>/setdaily [points]</code> — Set daily claim reward\n"
+            "• <code>/setbonus [points]</code> — Set group bonus reward\n"
             "• <code>/update</code> — Git stash, pull & Auto-resume all groups\n"
         )
     if is_owner(message.from_user.id):
@@ -690,6 +727,124 @@ async def help_cmd(_, message: Message):
             "• <code>/authlist</code> — List of authorized users\n"
         )
     await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+# ============================================================
+# DAILY & GROUP BONUS CLAIM SYSTEM
+# ============================================================
+
+@app.on_message(filters.command("setdaily"))
+async def set_daily_cmd(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Auth users daily reward set kar sakte hain.")
+
+    if len(message.command) < 2:
+        return await message.reply_text("Usage: <code>/setdaily 100</code>", parse_mode=ParseMode.HTML)
+
+    try:
+        val = int(message.command[1])
+    except ValueError:
+        return await message.reply_text("❌ Invalid number.")
+
+    set_global_config("daily_points", val)
+    await message.reply_text(f"✅ Daily claim reward <b>{val} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("setbonus"))
+async def set_bonus_cmd(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Auth users group bonus reward set kar sakte hain.")
+
+    if len(message.command) < 2:
+        return await message.reply_text("Usage: <code>/setbonus 200</code>", parse_mode=ParseMode.HTML)
+
+    try:
+        val = int(message.command[1])
+    except ValueError:
+        return await message.reply_text("❌ Invalid number.")
+
+    set_global_config("bonus_points", val)
+    await message.reply_text(f"✅ Group admin bonus reward <b>{val} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("daily"))
+async def daily_cmd(_, message: Message):
+    if message.chat.type != ChatType.PRIVATE:
+        return await message.reply_text("❌ <code>/daily</code> command sirf bot ke DM (Private Chat) mein use kar sakte hain.", parse_mode=ParseMode.HTML)
+
+    ensure_user(message.from_user)
+    u = get_user(message.from_user.id)
+    now = time.time()
+    last = u["last_daily"] or 0
+    cooldown = 86400  # 24 Hours
+
+    if now - last < cooldown:
+        rem = int(cooldown - (now - last))
+        hrs = rem // 3600
+        mins = (rem % 3600) // 60
+        return await message.reply_text(f"⏳ Aapne aaj ka daily reward claim kar liya hai!\nNext claim available in: <b>{hrs}h {mins}m</b>", parse_mode=ParseMode.HTML)
+
+    reward = get_global_config("daily_points", 50)
+    DB.execute("""
+        UPDATE users 
+        SET points = points + ?, last_daily = ?
+        WHERE user_id = ?
+    """, (reward, now, message.from_user.id))
+    
+    DB.execute("""
+        INSERT INTO score_history (user_id, chat_id, points, timestamp)
+        VALUES (?, 0, ?, ?)
+    """, (message.from_user.id, reward, now))
+    DB.commit()
+
+    await message.reply_text(
+        f"🎁 <b>Daily Reward Claimed!</b>\n\n"
+        f"⭐ <b>+{reward} Points</b> successfully aapke balance mein add kar diye gaye hain.\n"
+        f"Wapas 24 ghante baad claim karein!",
+        parse_mode=ParseMode.HTML
+    )
+
+@app.on_message(filters.command("bonus"))
+async def bonus_cmd(_, message: Message):
+    if not is_group(message):
+        return await message.reply_text("❌ <code>/bonus</code> command sirf group mein chal sakti hai jahan aapne bot ko admin banaya hai.", parse_mode=ParseMode.HTML)
+
+    ensure_user(message.from_user)
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    # 1. Check if Bot is Admin
+    try:
+        bot_member = await message.chat.get_member("me")
+        if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            return await message.reply_text("⚠️ Bonus claim karne ke liye pehle bot ko is group mein <b>Admin Rights</b> dein!", parse_mode=ParseMode.HTML)
+    except Exception:
+        return await message.reply_text("❌ Bot ke permissions verify nahi ho sake. Kripya bot ko Admin banayein.")
+
+    # 2. Check if already claimed for this group
+    claimed = DB.execute("SELECT * FROM group_bonus WHERE user_id=? AND chat_id=?", (user_id, chat_id)).fetchone()
+    if claimed:
+        return await message.reply_text("⚠️ Aapne is group ke liye bonus pehle hi claim kar liya hai!")
+
+    bonus_pts = get_global_config("bonus_points", 100)
+    now = time.time()
+
+    DB.execute("""
+        INSERT INTO group_bonus (user_id, chat_id, claimed_at)
+        VALUES (?, ?, ?)
+    """, (user_id, chat_id, now))
+
+    DB.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (bonus_pts, user_id))
+    DB.execute("""
+        INSERT INTO score_history (user_id, chat_id, points, timestamp)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, chat_id, bonus_pts, now))
+    DB.commit()
+
+    mention = get_mention(message.from_user)
+    await message.reply_text(
+        f"🎉 <b>Group Bonus Claimed!</b>\n\n"
+        f"👤 {mention}\n"
+        f"⭐ <b>+{bonus_pts} Points</b> successfully aapke profile mein add ho gaye hain bot ko admin banane ke reward ke roop mein!",
+        parse_mode=ParseMode.HTML
+    )
 
 # ============================================================
 # PRIVACY SYSTEM (/private & /public)
@@ -1296,7 +1451,8 @@ async def leaderboard_cmd(_, message: Message):
     filters.text &
     ~filters.command([
         "start", "help", "jumble", "stats", "leaderboard", "top", "rank", "lb",
-        "jumblefight", "fight", "rapido", "settings", "setpoints", "sethint", "private", "public",
+        "jumblefight", "fight", "rapido", "settings", "setpoints", "sethint", "setdaily", "setbonus",
+        "daily", "bonus", "private", "public",
         "addword", "delword", "word", "words", "auth", "unauth", "authlist", "update", "gitpull"
     ])
 )
@@ -1835,7 +1991,6 @@ async def resume_all_active_games():
         c_id = row["chat_id"]
         diff = row["default_diff"] or "medium"
         try:
-            # Agar koi existing puzzle expire ho chuka hai ya nahi hai to fresh puzzle launch karo
             existing = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (c_id,)).fetchone()
             if not existing or time.time() > existing["expires"]:
                 asyncio.create_task(start_game(c_id, diff, c_id))
