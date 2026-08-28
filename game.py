@@ -3,22 +3,30 @@ import io
 import os
 import random
 import sqlite3
+import subprocess
+import sys
 import time
 from collections import defaultdict
 
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatMemberStatus
-from pyrogram.errors import MessageNotModified
+from pyrogram.errors import MessageNotModified, RPCError
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 # ============================================================
-# CONFIG
+# CONFIG & ENV SETUP
 # ============================================================
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 API_ID = int(os.getenv("API_ID", "35218869"))
 API_HASH = os.getenv("API_HASH", "80baadcfd00a39a0ff1f5f529d23156f")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "8564072723"))
 
 START_IMG = "https://graph.org/file/7c0c03d68308f0c5dad42-ddb933df03f0ff0632.jpg"
@@ -36,7 +44,7 @@ DB.row_factory = sqlite3.Row
 LOCK = asyncio.Lock()
 
 # ============================================================
-# DEFAULT WORD BANK
+# WORD BANK
 # ============================================================
 
 DEFAULT_EASY = """
@@ -83,8 +91,8 @@ CREATE TABLE IF NOT EXISTS users (
     solved INTEGER DEFAULT 0,
     best_streak INTEGER DEFAULT 0,
     streak INTEGER DEFAULT 0,
-    rapido_wins INTEGER DEFAULT 0,
-    rapido_losses INTEGER DEFAULT 0
+    fight_wins INTEGER DEFAULT 0,
+    fight_losses INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS auth_users (
@@ -107,7 +115,8 @@ CREATE TABLE IF NOT EXISTS settings (
     hard INTEGER DEFAULT 600,
     points_per_word INTEGER DEFAULT 10,
     default_diff TEXT DEFAULT 'medium',
-    is_active INTEGER DEFAULT 1
+    is_active INTEGER DEFAULT 1,
+    auto_delete INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS games (
@@ -147,21 +156,24 @@ def run_migrations():
         DB.execute("ALTER TABLE settings ADD COLUMN points_per_word INTEGER DEFAULT 10")
     if "is_active" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN is_active INTEGER DEFAULT 1")
+    if "auto_delete" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN auto_delete INTEGER DEFAULT 0")
+    
+    user_cols = [c[1] for c in DB.execute("PRAGMA table_info(users)").fetchall()]
+    if "fight_wins" not in user_cols:
+        DB.execute("ALTER TABLE users ADD COLUMN fight_wins INTEGER DEFAULT 0")
+    if "fight_losses" not in user_cols:
+        DB.execute("ALTER TABLE users ADD COLUMN fight_losses INTEGER DEFAULT 0")
     DB.commit()
 
 run_migrations()
 
-# ============================================================
-# WORD SYSTEM INITIALIZATION
-# ============================================================
-
 WORDS = {
     "easy": list(set(w.lower() for w in DEFAULT_EASY if len(w) >= 4)),
     "medium": list(set(w.lower() for w in DEFAULT_MEDIUM if len(w) >= 6)),
-    "hard": list(set(w.lower() for w in HARD if len(w) >= 8)) if 'HARD' in locals() else list(set(w.lower() for w in DEFAULT_HARD if len(w) >= 8))
+    "hard": list(set(w.lower() for w in DEFAULT_HARD if len(w) >= 8))
 }
 
-# Load custom words from DB
 custom_rows = DB.execute("SELECT difficulty, word FROM custom_words").fetchall()
 for row in custom_rows:
     diff = row["difficulty"]
@@ -216,8 +228,8 @@ def get_settings(chat_id):
     row = DB.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     if not row:
         DB.execute("""
-            INSERT INTO settings(chat_id, easy, medium, hard, points_per_word, default_diff, is_active)
-            VALUES (?, 120, 300, 600, 10, 'medium', 1)
+            INSERT INTO settings(chat_id, easy, medium, hard, points_per_word, default_diff, is_active, auto_delete)
+            VALUES (?, 120, 300, 600, 10, 'medium', 1, 0)
             ON CONFLICT(chat_id) DO NOTHING
         """, (chat_id,))
         DB.commit()
@@ -306,6 +318,13 @@ def make_puzzle_image(jumbled, mode_tag, puzzle_id):
     bio.seek(0)
     return bio
 
+async def delete_after(msg: Message, delay: int = 5):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
 # ============================================================
 # NORMAL GAME CORE
 # ============================================================
@@ -322,7 +341,7 @@ def normal_keyboard():
     ])
 
 async def start_game(chat_id, difficulty, message_or_chat):
-    if chat_id in RAPIDO:
+    if chat_id in JUMBLE_FIGHT:
         return
 
     settings = get_settings(chat_id)
@@ -374,7 +393,7 @@ async def start_game(chat_id, difficulty, message_or_chat):
 
 async def expire_game(chat_id, puzzle_id, expires, difficulty):
     await asyncio.sleep(max(0, expires - time.time()))
-    if chat_id in RAPIDO:
+    if chat_id in JUMBLE_FIGHT:
         return
 
     row = DB.execute("SELECT * FROM games WHERE chat_id=? AND puzzle_id=?", (chat_id, puzzle_id)).fetchone()
@@ -384,60 +403,69 @@ async def expire_game(chat_id, puzzle_id, expires, difficulty):
     DB.execute("UPDATE games SET solved=1 WHERE chat_id=?", (chat_id,))
     DB.commit()
 
+    s = get_settings(chat_id)
+    if s["auto_delete"] and row["message_id"]:
+        try:
+            await app.delete_messages(chat_id, row["message_id"])
+        except Exception:
+            pass
+
     try:
-        await app.send_message(
+        exp_msg = await app.send_message(
             chat_id,
             f"⏰ **Time's Up!**\n\n❌ Nobody solved it.\n✅ Answer: **{row['word'].upper()}**\n\n🔄 Next puzzle starting in 3 seconds..."
         )
+        if s["auto_delete"]:
+            asyncio.create_task(delete_after(exp_msg, 4))
     except Exception:
         pass
 
     await asyncio.sleep(3)
     s = get_settings(chat_id)
-    if chat_id not in RAPIDO and s["is_active"]:
+    if chat_id not in JUMBLE_FIGHT and s["is_active"]:
         asyncio.create_task(start_game(chat_id, difficulty, chat_id))
 
 # ============================================================
-# RAPIDO 1v1 SYSTEM
+# JUMBLE FIGHT (1v1 BATTLE SYSTEM)
 # ============================================================
 
-RAPIDO = {}
-RAPIDO_LOBBY = {}
+JUMBLE_FIGHT = {}
+FIGHT_LOBBY = {}
 
-def rapido_keyboard():
+def fight_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💡 Hint (3/word)", callback_data="rapido_hint")
+            InlineKeyboardButton("💡 Hint (3/word)", callback_data="fight_hint")
         ]
     ])
 
-async def rapido_timeout_task(chat_id, round_num, timer_duration):
+async def fight_timeout_task(chat_id, round_num, timer_duration):
     await asyncio.sleep(timer_duration)
 
     should_advance = False
     async with LOCK:
-        game = RAPIDO.get(chat_id)
+        game = JUMBLE_FIGHT.get(chat_id)
         if game and game["round"] == round_num:
             word = game["word"]
             try:
-                await app.send_message(
+                t_msg = await app.send_message(
                     chat_id,
                     f"⏰ **Round {round_num} Timeout!**\n❌ Kisi ne solve nahi kiya.\n✅ Answer: **{word.upper()}**\n\n🔄 Next round starting..."
                 )
+                asyncio.create_task(delete_after(t_msg, 4))
             except Exception:
                 pass
             should_advance = True
 
     if should_advance:
         await asyncio.sleep(2.5)
-        asyncio.create_task(rapido_next(chat_id))
+        asyncio.create_task(fight_next(chat_id))
 
-async def rapido_next(chat_id):
-    game = RAPIDO.get(chat_id)
+async def fight_next(chat_id):
+    game = JUMBLE_FIGHT.get(chat_id)
     if not game:
         return
 
-    # Clean cancellation of previous task without self-cancelling
     curr = asyncio.current_task()
     if game.get("task") and game["task"] is not curr and not game["task"].done():
         try:
@@ -447,7 +475,7 @@ async def rapido_next(chat_id):
 
     game["round"] += 1
     if game["round"] > 10:
-        await finish_rapido(chat_id)
+        await finish_fight(chat_id)
         return
 
     diff = game["difficulty"]
@@ -458,32 +486,33 @@ async def rapido_next(chat_id):
     game["expires"] = time.time() + game["timer"]
     game["round_hints"] = defaultdict(lambda: {"count": 0, "indices": []})
 
-    image = make_puzzle_image(jumbled, f"RAPIDO {diff.upper()}", game["round"])
+    image = make_puzzle_image(jumbled, f"FIGHT {diff.upper()}", game["round"])
     
     try:
         sent = await app.send_photo(
             chat_id,
             photo=image,
             caption=(
-                f"⚔️ **RAPIDO — ROUND {game['round']}/10**\n\n"
+                f"⚔️ **JUMBLE FIGHT — ROUND {game['round']}/10**\n\n"
                 f"🎯 Difficulty: **{diff.title()}**\n"
                 f"⏱️ Time: **{game['timer']}s**\n"
                 f"🔀 Solve fastest!\n"
                 f"👥 Players: {game['names'][game['players'][0]]} 🆚 {game['names'][game['players'][1]]}"
             ),
-            reply_markup=rapido_keyboard()
+            reply_markup=fight_keyboard()
         )
+        game["msg_id"] = sent.id
         try:
             await sent.pin(disable_notification=True)
         except Exception:
             pass
     except Exception as e:
-        print(f"Rapido send error: {e}")
+        print(f"Fight send error: {e}")
 
-    game["task"] = asyncio.create_task(rapido_timeout_task(chat_id, game["round"], game["timer"]))
+    game["task"] = asyncio.create_task(fight_timeout_task(chat_id, game["round"], game["timer"]))
 
-async def finish_rapido(chat_id):
-    game = RAPIDO.pop(chat_id, None)
+async def finish_fight(chat_id):
+    game = JUMBLE_FIGHT.pop(chat_id, None)
     if not game:
         return
 
@@ -505,12 +534,12 @@ async def finish_rapido(chat_id):
         winner = loser = None
 
     if winner:
-        DB.execute("UPDATE users SET rapido_wins=rapido_wins+1 WHERE user_id=?", (winner,))
-        DB.execute("UPDATE users SET rapido_losses=rapido_losses+1 WHERE user_id=?", (loser,))
+        DB.execute("UPDATE users SET fight_wins=fight_wins+1 WHERE user_id=?", (winner,))
+        DB.execute("UPDATE users SET fight_losses=fight_losses+1 WHERE user_id=?", (loser,))
         DB.commit()
 
     n1, n2 = game["names"][p1], game["names"][p2]
-    result = f"🏁 **RAPIDO MATCH OVER!**\n\n👤 **{n1}** — {s1} pts\n👤 **{n2}** — {s2} pts\n\n"
+    result = f"🏁 **JUMBLE FIGHT OVER!**\n\n👤 **{n1}** — {s1} pts\n👤 **{n2}** — {s2} pts\n\n"
 
     if winner:
         result += f"🏆 Match Winner: **{game['names'][winner]}** 🎉"
@@ -519,7 +548,6 @@ async def finish_rapido(chat_id):
 
     await app.send_message(chat_id, result)
 
-    # Automatically resume group's jumble game if active
     await asyncio.sleep(3)
     s = get_settings(chat_id)
     if s["is_active"]:
@@ -527,7 +555,7 @@ async def finish_rapido(chat_id):
         asyncio.create_task(start_game(chat_id, s["default_diff"], chat_id))
 
 # ============================================================
-# COMMANDS
+# COMMAND HANDLERS
 # ============================================================
 
 @app.on_message(filters.command("start"))
@@ -537,8 +565,8 @@ async def start_cmd(_, message: Message):
         "🧩 **Welcome to Advanced Jumble Bot!**\n\n"
         "🎮 **Game Commands:**\n"
         "• `/jumble` — Start Auto-loop Jumble Game\n"
-        "• `/rapido @user` — 1v1 Battle with Custom Timer & Mode\n"
-        "• `/settings` — Admin Panel (Start/Stop, Mode & Timer)\n\n"
+        "• `/jumblefight @user` — 1v1 Battle Mode\n"
+        "• `/settings` — Admin Panel (Start/Stop, Mode, Auto-delete)\n\n"
         "📊 **Stats & Rankings:**\n"
         "• `/stats` — Your Performance\n"
         "• `/leaderboard` — Top Global Players\n"
@@ -563,7 +591,7 @@ async def help_cmd(_, message: Message):
     text = (
         "🧩 **Jumble Commands Guide**\n\n"
         "`/jumble` — Start auto-looping jumble game\n"
-        "`/rapido @user` — 1v1 battle match\n"
+        "`/jumblefight @user` — 1v1 battle match\n"
         "`/settings` — Admin start/stop and game settings\n"
         "`/leaderboard` — Top players ranking\n"
         "`/stats` — Personal score card\n\n"
@@ -575,6 +603,7 @@ async def help_cmd(_, message: Message):
             "`/word` — View categorized word bank\n"
             "`/addword easy word` — Add new word to bank\n"
             "`/delword easy word` — Delete word from bank\n"
+            "`/update` — Update bot from GitHub repository\n"
         )
     if is_owner(message.from_user.id):
         text += (
@@ -587,7 +616,28 @@ async def help_cmd(_, message: Message):
     await message.reply_text(text)
 
 # ============================================================
-# AUTH SYSTEM (OWNER ONLY)
+# GIT UPDATER (AUTH / OWNER ONLY)
+# ============================================================
+
+@app.on_message(filters.command(["update", "gitpull"]))
+async def update_bot_cmd(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Authorized users bot update kar sakte hain.")
+
+    msg = await message.reply_text("🔄 **Pulling latest changes from GitHub...**")
+    try:
+        subprocess.run(["git", "stash"], check=True, capture_output=True, text=True)
+        pull_res = subprocess.run(["git", "pull"], check=True, capture_output=True, text=True)
+        out = pull_res.stdout or "Updated successfully."
+        
+        await msg.edit_text(f"✅ **Git Pull Output:**\n`{out[:500]}`\n\n🚀 **Restarting bot instance...**")
+        await asyncio.sleep(1.5)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        await msg.edit_text(f"❌ **Update Failed:**\n`{str(e)}`")
+
+# ============================================================
+# AUTH SYSTEM (AUTO-CLEANUP COMMANDS)
 # ============================================================
 
 @app.on_message(filters.command("auth"))
@@ -618,7 +668,9 @@ async def auth_cmd(_, message: Message):
     """, (target.id, target.username or "", target.first_name or "User", time.time()))
     DB.commit()
 
-    await message.reply_text(f"✅ **{target.first_name}** ko successfully **Auth Access** de diya gaya hai.")
+    res = await message.reply_text(f"✅ **{target.first_name}** ko **Auth Access** de diya gaya.")
+    asyncio.create_task(delete_after(message, 5))
+    asyncio.create_task(delete_after(res, 5))
 
 @app.on_message(filters.command("unauth"))
 async def unauth_cmd(_, message: Message):
@@ -639,7 +691,9 @@ async def unauth_cmd(_, message: Message):
     DB.execute("DELETE FROM auth_users WHERE user_id=?", (target.id,))
     DB.commit()
 
-    await message.reply_text(f"🚫 **{target.first_name}** ka auth access remove kar diya gaya.")
+    res = await message.reply_text(f"🚫 **{target.first_name}** ka auth access remove kar diya gaya.")
+    asyncio.create_task(delete_after(message, 5))
+    asyncio.create_task(delete_after(res, 5))
 
 @app.on_message(filters.command("authlist"))
 async def authlist_cmd(_, message: Message):
@@ -657,10 +711,12 @@ async def authlist_cmd(_, message: Message):
             uname = f"@{row['username']}" if row['username'] else "No Username"
             text += f"`{i}.` **{row['name']}** ({uname}) — ID: `{row['user_id']}`\n"
 
-    await message.reply_text(text)
+    res = await message.reply_text(text)
+    asyncio.create_task(delete_after(message, 10))
+    asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# WORD BANK MANAGEMENT (OWNER & AUTH USERS)
+# WORD BANK MANAGEMENT (AUTO CLEANUP)
 # ============================================================
 
 @app.on_message(filters.command("addword"))
@@ -681,13 +737,18 @@ async def addword_cmd(_, message: Message):
         return await message.reply_text("❌ Word bohot chhota hai.")
 
     if new_word in WORDS[difficulty]:
-        return await message.reply_text("⚠️ Yeh word already database mein available hai.")
+        res = await message.reply_text("⚠️ Yeh word already database mein available hai.")
+        asyncio.create_task(delete_after(message, 5))
+        asyncio.create_task(delete_after(res, 5))
+        return
 
     WORDS[difficulty].append(new_word)
     DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, new_word))
     DB.commit()
 
-    await message.reply_text(f"✅ Word **'{new_word.upper()}'** successfully added to **{difficulty.upper()}** bank!")
+    res = await message.reply_text(f"✅ Word **'{new_word.upper()}'** added to **{difficulty.upper()}** bank!")
+    asyncio.create_task(delete_after(message, 5))
+    asyncio.create_task(delete_after(res, 5))
 
 @app.on_message(filters.command("delword"))
 async def delword_cmd(_, message: Message):
@@ -704,14 +765,19 @@ async def delword_cmd(_, message: Message):
         return await message.reply_text("❌ Valid difficulties: `easy`, `medium`, `hard`.")
 
     if word_to_del not in WORDS[difficulty]:
-        return await message.reply_text(f"❌ Word **'{word_to_del.upper()}'** {difficulty.upper()} bank mein nahi mila.")
+        res = await message.reply_text(f"❌ Word **'{word_to_del.upper()}'** {difficulty.upper()} bank mein nahi mila.")
+        asyncio.create_task(delete_after(message, 5))
+        asyncio.create_task(delete_after(res, 5))
+        return
 
     WORDS[difficulty].remove(word_to_del)
     DB.execute("DELETE FROM custom_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
     DB.execute("DELETE FROM used_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
     DB.commit()
 
-    await message.reply_text(f"🗑️ Word **'{word_to_del.upper()}'** successfully deleted from **{difficulty.upper()}** bank!")
+    res = await message.reply_text(f"🗑️ Word **'{word_to_del.upper()}'** deleted from **{difficulty.upper()}** bank!")
+    asyncio.create_task(delete_after(message, 5))
+    asyncio.create_task(delete_after(res, 5))
 
 @app.on_message(filters.command(["word", "words"]))
 async def words_menu_cmd(_, message: Message):
@@ -737,9 +803,10 @@ async def words_menu_cmd(_, message: Message):
         "Neeche buttons par click karke category ke words check karein:",
         reply_markup=kb
     )
+    asyncio.create_task(delete_after(message, 3))
 
 # ============================================================
-# ADMIN & GAME COMMANDS
+# GAME & SETTINGS COMMANDS
 # ============================================================
 
 @app.on_message(filters.command("settings"))
@@ -750,7 +817,8 @@ async def settings_cmd(_, message: Message):
     s = get_settings(message.chat.id)
     cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
     status_btn = InlineKeyboardButton("⏹️ Stop Game", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ Start Game", callback_data="set_start_game")
-    
+    del_btn = InlineKeyboardButton("🗑️ Auto-Del: ON", callback_data="set_toggle_autodel") if s["auto_delete"] else InlineKeyboardButton("🗑️ Auto-Del: OFF", callback_data="set_toggle_autodel")
+
     kb = InlineKeyboardMarkup([
         [
             status_btn,
@@ -758,12 +826,16 @@ async def settings_cmd(_, message: Message):
         ],
         [
             InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers"),
+            del_btn
+        ],
+        [
             InlineKeyboardButton("❌ Close", callback_data="close_panel")
         ]
     ])
     await message.reply_text(
         f"⚙️ **Jumble Group Settings**\n\n"
         f"🟢 Game Status: **{'Running' if s['is_active'] else 'Stopped'}**\n"
+        f"🗑️ Auto Delete Old: **{'Enabled' if s['auto_delete'] else 'Disabled'}**\n"
         f"🎯 Default Mode: **{str(cur_diff).title()}**\n"
         f"⏱️ Timers: Easy: **{s['easy']}s** | Medium: **{s['medium']}s** | Hard: **{s['hard']}s**\n"
         f"⭐ Reward per word: **{s['points_per_word']} pts**",
@@ -773,8 +845,8 @@ async def settings_cmd(_, message: Message):
 @app.on_message(filters.command("jumble"))
 async def jumble_cmd(_, message: Message):
     ensure_user(message.from_user)
-    if message.chat.id in RAPIDO:
-        return await message.reply_text("⚔️ Rapido battle chal rahi hai, match khatam hone tak wait karein.")
+    if message.chat.id in JUMBLE_FIGHT:
+        return await message.reply_text("⚔️ Jumble Fight chal rahi hai, match khatam hone tak wait karein.")
 
     DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
     DB.commit()
@@ -788,24 +860,34 @@ async def jumble_cmd(_, message: Message):
 
     await start_game(message.chat.id, difficulty, message)
 
-@app.on_message(filters.command("rapido"))
-async def rapido_cmd(_, message: Message):
+@app.on_message(filters.command(["jumblefight", "fight", "rapido"]))
+async def jumble_fight_cmd(_, message: Message):
     if not is_group(message):
-        return await message.reply_text("❌ Rapido sirf groups mein chalta hai.")
+        return await message.reply_text("❌ Jumble Fight sirf groups mein chal sakta hai.")
 
     target_user = None
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
     elif len(message.command) >= 2:
+        arg = message.command[1]
         try:
-            target_user = await app.get_users(message.command[1])
+            if arg.isdigit():
+                target_user = await app.get_users(int(arg))
+            else:
+                target_user = await app.get_users(arg)
         except Exception:
             return await message.reply_text("❌ User nahi mila.")
-    else:
-        return await message.reply_text("Usage:\n• `/rapido @username`\n• Reply to a user with `/rapido`")
+    elif message.entities:
+        for entity in message.entities:
+            if entity.type.name == "TEXT_MENTION" and entity.user:
+                target_user = entity.user
+                break
+
+    if not target_user:
+        return await message.reply_text("Usage:\n• `/jumblefight @username`\n• `/jumblefight UserID`\n• Reply to a user with `/jumblefight`")
 
     if target_user.id == message.from_user.id:
-        return await message.reply_text("❌ Khud ko challenge nahi kar sakte.")
+        return await message.reply_text("❌ Khud ke sath fight nahi kar sakte.")
 
     if target_user.is_bot:
         return await message.reply_text("❌ Bots ke sath match nahi ho sakta.")
@@ -814,10 +896,10 @@ async def rapido_cmd(_, message: Message):
     ensure_user(target_user)
 
     key = message.chat.id
-    if key in RAPIDO:
-        return await message.reply_text("⚔️ Is group mein already Rapido battle chal rahi hai.")
+    if key in JUMBLE_FIGHT:
+        return await message.reply_text("⚔️ Is group mein already Jumble Fight chal rahi hai.")
 
-    RAPIDO_LOBBY[key] = {
+    FIGHT_LOBBY[key] = {
         "p1": message.from_user.id,
         "p2": target_user.id,
         "p1_name": message.from_user.first_name,
@@ -828,25 +910,25 @@ async def rapido_cmd(_, message: Message):
 
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🟢 Easy", callback_data="r_diff_easy"),
-            InlineKeyboardButton("🟡 Medium", callback_data="r_diff_medium"),
-            InlineKeyboardButton("🔴 Hard", callback_data="r_diff_hard")
+            InlineKeyboardButton("🟢 Easy", callback_data="f_diff_easy"),
+            InlineKeyboardButton("🟡 Medium", callback_data="f_diff_medium"),
+            InlineKeyboardButton("🔴 Hard", callback_data="f_diff_hard")
         ],
         [
-            InlineKeyboardButton("⏱️ 30s", callback_data="r_time_30"),
-            InlineKeyboardButton("⏱️ 45s", callback_data="r_time_45"),
-            InlineKeyboardButton("⏱️ 60s", callback_data="r_time_60")
+            InlineKeyboardButton("⏱️ 30s", callback_data="f_time_30"),
+            InlineKeyboardButton("⏱️ 45s", callback_data="f_time_45"),
+            InlineKeyboardButton("⏱️ 60s", callback_data="f_time_60")
         ],
         [
-            InlineKeyboardButton("🚀 START BATTLE", callback_data="r_start")
+            InlineKeyboardButton("🚀 START FIGHT", callback_data="f_start")
         ]
     ])
 
     await message.reply_text(
-        f"⚔️ **RAPIDO 1v1 MATCH SETUP**\n\n"
+        f"⚔️ **JUMBLE FIGHT 1v1 MATCH SETUP**\n\n"
         f"👤 **{message.from_user.first_name}** 🆚 **{target_user.first_name}**\n\n"
         f"🎯 Mode: **Medium** | ⏱️ Round Timer: **60s**\n"
-        f"Select mode & timer below, then press **START BATTLE**!",
+        f"Select mode & timer below, then press **START FIGHT**!",
         reply_markup=kb
     )
 
@@ -854,8 +936,8 @@ async def rapido_cmd(_, message: Message):
 async def stats_cmd(_, message: Message):
     ensure_user(message.from_user)
     u = get_user(message.from_user.id)
-    total = u["rapido_wins"] + u["rapido_losses"]
-    winrate = ((u["rapido_wins"] / total) * 100) if total else 0
+    total = u["fight_wins"] + u["fight_losses"]
+    winrate = ((u["fight_wins"] / total) * 100) if total else 0
 
     await message.reply_text(
         f"👤 **{u['name']}**\n\n"
@@ -863,7 +945,7 @@ async def stats_cmd(_, message: Message):
         f"🧩 Solved: **{u['solved']}**\n"
         f"🔥 Streak: **{u['streak']}** (Best: {u['best_streak']})\n"
         f"💡 Hints: **3 per puzzle**\n\n"
-        f"⚔️ Rapido Record: **{u['rapido_wins']}W - {u['rapido_losses']}L**\n"
+        f"⚔️ Jumble Fight: **{u['fight_wins']}W - {u['fight_losses']}L**\n"
         f"📈 Win Rate: **{winrate:.1f}%**"
     )
 
@@ -913,8 +995,8 @@ async def set_points(_, message: Message):
     filters.text &
     ~filters.command([
         "start", "help", "jumble", "stats", "leaderboard",
-        "rapido", "settings", "setpoints", "addword", "delword",
-        "word", "words", "auth", "unauth", "authlist"
+        "jumblefight", "fight", "rapido", "settings", "setpoints",
+        "addword", "delword", "word", "words", "auth", "unauth", "authlist", "update", "gitpull"
     ])
 )
 async def unified_answer_handler(_, message: Message):
@@ -925,10 +1007,10 @@ async def unified_answer_handler(_, message: Message):
     user_id = message.from_user.id
     cleaned_input = clean_answer(message.text)
 
-    # 1. Active Rapido Check
-    if chat_id in RAPIDO:
+    # 1. Active Jumble Fight Check
+    if chat_id in JUMBLE_FIGHT:
         async with LOCK:
-            game = RAPIDO.get(chat_id)
+            game = JUMBLE_FIGHT.get(chat_id)
             if not game or user_id not in game["players"]:
                 return
 
@@ -941,12 +1023,13 @@ async def unified_answer_handler(_, message: Message):
                         pass
 
                 game["scores"][user_id] += 1
-                await message.reply_text(
+                r_msg = await message.reply_text(
                     f"⚡ **{message.from_user.first_name} WON ROUND {game['round']}!**\n"
                     f"🏆 Round Score: {game['scores'][user_id]}"
                 )
+                asyncio.create_task(delete_after(r_msg, 4))
                 await asyncio.sleep(2.5)
-                asyncio.create_task(rapido_next(chat_id))
+                asyncio.create_task(fight_next(chat_id))
                 return
         return
 
@@ -976,7 +1059,13 @@ async def unified_answer_handler(_, message: Message):
         """, (pts_reward, new_streak, best, user_id))
         DB.commit()
 
-        await message.reply_text(
+        if settings["auto_delete"] and game["message_id"]:
+            try:
+                await app.delete_messages(chat_id, game["message_id"])
+            except Exception:
+                pass
+
+        c_msg = await message.reply_text(
             f"🎉 **CORRECT!**\n\n"
             f"👤 {message.from_user.first_name}\n"
             f"✅ Answer: **{game['word'].upper()}**\n"
@@ -985,9 +1074,12 @@ async def unified_answer_handler(_, message: Message):
             f"🔄 Next puzzle coming in 3 seconds..."
         )
 
+        if settings["auto_delete"]:
+            asyncio.create_task(delete_after(c_msg, 4))
+
         await asyncio.sleep(3)
         s = get_settings(chat_id)
-        if chat_id not in RAPIDO and s["is_active"]:
+        if chat_id not in JUMBLE_FIGHT and s["is_active"]:
             asyncio.create_task(start_game(chat_id, game["difficulty"], chat_id))
 
 # ============================================================
@@ -1000,7 +1092,6 @@ async def callback_router(_, query: CallbackQuery):
     chat_id = query.message.chat.id
     user_id = query.from_user.id
 
-    # Normal Hint
     if data == "hint":
         game = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (chat_id,)).fetchone()
         if not game:
@@ -1037,9 +1128,8 @@ async def callback_router(_, query: CallbackQuery):
         letter = word[chosen_index].upper()
         return await query.answer(f"💡 Hint: Letter #{chosen_index + 1} is '{letter}'\nRemaining: {3 - hints_used}/3", show_alert=True)
 
-    # Rapido Hint
-    elif data == "rapido_hint":
-        game = RAPIDO.get(chat_id)
+    elif data == "fight_hint":
+        game = JUMBLE_FIGHT.get(chat_id)
         if not game or user_id not in game["players"]:
             return await query.answer("❌ Sirf match players hints le sakte hain.", show_alert=True)
 
@@ -1058,15 +1148,17 @@ async def callback_router(_, query: CallbackQuery):
 
         return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {3 - p_hint['count']}/3", show_alert=True)
 
-    # Word Bank Viewer
     elif data.startswith("view_words_"):
         if not is_authed(user_id):
             return await query.answer("❌ Sirf Auth Users word bank dekh sakte hain.", show_alert=True)
 
         diff = data.split("_")[2]
-        word_list = WORDS.get(diff, [])
-        sample_words = ", ".join(sorted(w.upper() for w in word_list[:40]))
+        word_list = sorted(WORDS.get(diff, []))
         total_count = len(word_list)
+        
+        sample_words = ", ".join(w.upper() for w in word_list[:50])
+        if total_count > 50:
+            sample_words += f" ...and {total_count - 50} more"
 
         kb = InlineKeyboardMarkup([
             [
@@ -1082,7 +1174,7 @@ async def callback_router(_, query: CallbackQuery):
 
         msg = (
             f"📚 **Category: {diff.upper()} ({total_count} Total)**\n\n"
-            f"**Words Preview:**\n`{sample_words}`\n\n"
+            f"**Words List:**\n`{sample_words}`\n\n"
             f"➕ Add: `/addword {diff} <word>`\n"
             f"➖ Del: `/delword {diff} <word>`"
         )
@@ -1117,23 +1209,22 @@ async def callback_router(_, query: CallbackQuery):
         except MessageNotModified:
             pass
 
-    # Rapido Setup Selection
-    elif data.startswith("r_"):
-        lobby = RAPIDO_LOBBY.get(chat_id)
+    elif data.startswith("f_"):
+        lobby = FIGHT_LOBBY.get(chat_id)
         if not lobby:
             return await query.answer("Match lobby expire ho chuki hai.", show_alert=True)
 
         if user_id not in (lobby["p1"], lobby["p2"]) and not await is_admin_or_owner(query.message.chat, user_id):
-            return await query.answer("❌ Match creator ya player hi setting change kar sakte hain.", show_alert=True)
+            return await query.answer("❌ Match players hi settings change kar sakte hain.", show_alert=True)
 
-        if data.startswith("r_diff_"):
+        if data.startswith("f_diff_"):
             lobby["difficulty"] = data.split("_")[2]
             await query.answer(f"Difficulty set to {lobby['difficulty'].upper()}")
-        elif data.startswith("r_time_"):
+        elif data.startswith("f_time_"):
             lobby["timer"] = int(data.split("_")[2])
             await query.answer(f"Timer set to {lobby['timer']}s")
-        elif data == "r_start":
-            RAPIDO[chat_id] = {
+        elif data == "f_start":
+            JUMBLE_FIGHT[chat_id] = {
                 "players": [lobby["p1"], lobby["p2"]],
                 "names": {lobby["p1"]: lobby["p1_name"], lobby["p2"]: lobby["p2_name"]},
                 "round": 0,
@@ -1142,41 +1233,41 @@ async def callback_router(_, query: CallbackQuery):
                 "expires": None,
                 "task": None,
                 "difficulty": lobby["difficulty"],
-                "timer": lobby["timer"]
+                "timer": lobby["timer"],
+                "msg_id": None
             }
-            del RAPIDO_LOBBY[chat_id]
+            del FIGHT_LOBBY[chat_id]
             await query.message.delete()
-            await query.answer("🚀 Starting Match!")
-            asyncio.create_task(rapido_next(chat_id))
+            await query.answer("🚀 Starting Jumble Fight!")
+            asyncio.create_task(fight_next(chat_id))
             return
 
         kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(f"{'✅ ' if lobby['difficulty']=='easy' else ''}Easy", callback_data="r_diff_easy"),
-                InlineKeyboardButton(f"{'✅ ' if lobby['difficulty']=='medium' else ''}Medium", callback_data="r_diff_medium"),
-                InlineKeyboardButton(f"{'✅ ' if lobby['difficulty']=='hard' else ''}Hard", callback_data="r_diff_hard")
+                InlineKeyboardButton(f"{'✅ ' if lobby['difficulty']=='easy' else ''}Easy", callback_data="f_diff_easy"),
+                InlineKeyboardButton(f"{'✅ ' if lobby['difficulty']=='medium' else ''}Medium", callback_data="f_diff_medium"),
+                InlineKeyboardButton(f"{'✅ ' if lobby['difficulty']=='hard' else ''}Hard", callback_data="f_diff_hard")
             ],
             [
-                InlineKeyboardButton(f"{'✅ ' if lobby['timer']==30 else ''}30s", callback_data="r_time_30"),
-                InlineKeyboardButton(f"{'✅ ' if lobby['timer']==45 else ''}45s", callback_data="r_time_45"),
-                InlineKeyboardButton(f"{'✅ ' if lobby['timer']==60 else ''}60s", callback_data="r_time_60")
+                InlineKeyboardButton(f"{'✅ ' if lobby['timer']==30 else ''}30s", callback_data="f_time_30"),
+                InlineKeyboardButton(f"{'✅ ' if lobby['timer']==45 else ''}45s", callback_data="f_time_45"),
+                InlineKeyboardButton(f"{'✅ ' if lobby['timer']==60 else ''}60s", callback_data="f_time_60")
             ],
             [
-                InlineKeyboardButton("🚀 START BATTLE", callback_data="r_start")
+                InlineKeyboardButton("🚀 START FIGHT", callback_data="f_start")
             ]
         ])
         try:
             await query.message.edit_text(
-                f"⚔️ **RAPIDO 1v1 MATCH SETUP**\n\n"
+                f"⚔️ **JUMBLE FIGHT 1v1 MATCH SETUP**\n\n"
                 f"👤 **{lobby['p1_name']}** 🆚 **{lobby['p2_name']}**\n\n"
                 f"🎯 Mode: **{lobby['difficulty'].title()}** | ⏱️ Round Timer: **{lobby['timer']}s**\n"
-                f"Press **START BATTLE** to begin!",
+                f"Press **START FIGHT** to begin!",
                 reply_markup=kb
             )
         except MessageNotModified:
             pass
 
-    # Admin Settings Menus
     elif data.startswith("set_"):
         if not await is_admin_or_owner(query.message.chat, user_id):
             return await query.answer("❌ Only admins can change settings.", show_alert=True)
@@ -1194,6 +1285,14 @@ async def callback_router(_, query: CallbackQuery):
             DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
             DB.commit()
             await query.answer("⏹️ Game stopped!")
+            await show_settings_panel(query.message, chat_id)
+
+        elif data == "set_toggle_autodel":
+            s = get_settings(chat_id)
+            new_val = 0 if s["auto_delete"] else 1
+            DB.execute("UPDATE settings SET auto_delete=? WHERE chat_id=?", (new_val, chat_id))
+            DB.commit()
+            await query.answer(f"Auto Delete {'Enabled' if new_val else 'Disabled'}")
             await show_settings_panel(query.message, chat_id)
 
         elif data == "set_menu_mode":
@@ -1258,7 +1357,18 @@ async def callback_router(_, query: CallbackQuery):
 
         DB.execute("UPDATE games SET solved=1 WHERE chat_id=?", (chat_id,))
         DB.commit()
-        await query.message.reply_text(f"⏭️ **Skipped!**\nAnswer: **{game['word'].upper()}**\n\n🔄 Next puzzle starting in 3 seconds...")
+        
+        s = get_settings(chat_id)
+        if s["auto_delete"] and game["message_id"]:
+            try:
+                await app.delete_messages(chat_id, game["message_id"])
+            except Exception:
+                pass
+
+        sk_msg = await query.message.reply_text(f"⏭️ **Skipped!**\nAnswer: **{game['word'].upper()}**\n\n🔄 Next puzzle starting in 3 seconds...")
+        if s["auto_delete"]:
+            asyncio.create_task(delete_after(sk_msg, 4))
+            
         await query.answer("Skipped.")
         await asyncio.sleep(3)
         s = get_settings(chat_id)
@@ -1282,7 +1392,8 @@ async def show_settings_panel(message_obj, chat_id):
     s = get_settings(chat_id)
     cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
     status_btn = InlineKeyboardButton("⏹️ Stop Game", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ Start Game", callback_data="set_start_game")
-    
+    del_btn = InlineKeyboardButton("🗑️ Auto-Del: ON", callback_data="set_toggle_autodel") if s["auto_delete"] else InlineKeyboardButton("🗑️ Auto-Del: OFF", callback_data="set_toggle_autodel")
+
     kb = InlineKeyboardMarkup([
         [
             status_btn,
@@ -1290,12 +1401,16 @@ async def show_settings_panel(message_obj, chat_id):
         ],
         [
             InlineKeyboardButton("⏱️ Timers", callback_data="set_menu_timers"),
+            del_btn
+        ],
+        [
             InlineKeyboardButton("❌ Close", callback_data="close_panel")
         ]
     ])
     text = (
         f"⚙️ **Jumble Group Settings**\n\n"
         f"🟢 Game Status: **{'Running' if s['is_active'] else 'Stopped'}**\n"
+        f"🗑️ Auto Delete Old: **{'Enabled' if s['auto_delete'] else 'Disabled'}**\n"
         f"🎯 Default Mode: **{str(cur_diff).title()}**\n"
         f"⏱️ Timers: Easy: **{s['easy']}s** | Medium: **{s['medium']}s** | Hard: **{s['hard']}s**\n"
         f"⭐ Reward per word: **{s['points_per_word']} pts**"
@@ -1310,5 +1425,5 @@ async def show_settings_panel(message_obj, chat_id):
 # ============================================================
 
 if __name__ == "__main__":
-    print("🚀 Jumble & Rapido Bot Started Successfully!")
+    print("🚀 Jumble Fight & Jumble Bot Started Successfully!")
     app.run()
