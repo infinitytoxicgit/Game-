@@ -147,6 +147,14 @@ CREATE TABLE IF NOT EXISTS puzzle_hints (
     revealed_indices TEXT DEFAULT '',
     PRIMARY KEY(chat_id, puzzle_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS score_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    chat_id INTEGER,
+    points INTEGER,
+    timestamp REAL
+);
 """)
 DB.commit()
 
@@ -255,9 +263,10 @@ def get_mention(user_obj=None, user_id=None, first_name=None, username=None):
         f_name = first_name or "Player"
         u_name = username
 
+    clean_name = f_name.replace("<", "&lt;").replace(">", "&gt;")
     if u_name:
-        return f"@{u_name}"
-    return f"<a href='tg://openmessage?user_id={u_id}'>{f_name}</a>"
+        return f"<a href='https://t.me/{u_name}'>{clean_name}</a>"
+    return f"<a href='tg://openmessage?user_id={u_id}'>{clean_name}</a>"
 
 def clean_answer(text):
     return "".join(c.lower() for c in text if c.isalnum())
@@ -617,7 +626,7 @@ async def start_cmd(_, message: Message):
         "• <code>/settings</code> — Admin Panel (Start/Stop, Mode, Auto-delete)\n\n"
         "📊 <b>Stats & Rankings:</b>\n"
         "• <code>/stats</code> — Your Performance\n"
-        "• <code>/leaderboard</code> — Top Global Players\n"
+        "• <code>/leaderboard</code> — Daily, Weekly, Monthly & Global Ranks\n"
         "• <code>/help</code> — Full Bot Guide"
     )
 
@@ -641,7 +650,7 @@ async def help_cmd(_, message: Message):
         "<code>/jumble</code> — Start auto-looping jumble game\n"
         "<code>/jumblefight @user</code> — 1v1 battle match\n"
         "<code>/settings</code> — Admin start/stop and game settings\n"
-        "<code>/leaderboard</code> — Top players ranking\n"
+        "<code>/leaderboard</code> — Top players ranking (Daily/Weekly/Monthly/Global)\n"
         "<code>/stats</code> — Personal score card\n\n"
         "💡 Har word par aapko <b>3 fresh hints</b> milti hain.\n"
     )
@@ -718,7 +727,7 @@ async def auth_cmd(_, message: Message):
     DB.commit()
 
     mention = get_mention(target)
-    res = await message.reply_text(f"✅ {mention} ko <b>Auth Access</b> de diya gaya.", parse_mode=ParseMode.HTML)
+    res = await message.reply_text(f"✅ {mention} (<code>{target.id}</code>) ko <b>Auth Access</b> de diya gaya.", parse_mode=ParseMode.HTML)
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
@@ -743,7 +752,7 @@ async def unauth_cmd(_, message: Message):
     DB.commit()
 
     mention = get_mention(target)
-    res = await message.reply_text(f"🚫 {mention} ka auth access remove kar diya gaya.", parse_mode=ParseMode.HTML)
+    res = await message.reply_text(f"🚫 {mention} (<code>{target.id}</code>) ka auth access remove kar diya gaya.", parse_mode=ParseMode.HTML)
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
@@ -1033,8 +1042,8 @@ async def jumble_fight_cmd(_, message: Message):
 
     await message.reply_text(
         f"⚔️ <b>JUMBLE FIGHT 1v1 CHALLENGE!</b>\n\n"
-        f"👤 <b>Challenger:</b> {m1}\n"
-        f"🎯 <b>Target:</b> {m2}\n\n"
+        f"👤 <b>Challenger:</b> {m1} (<code>{message.from_user.id}</code>)\n"
+        f"🎯 <b>Target:</b> {m2} (<code>{target_user.id}</code>)\n\n"
         f"⚙️ <b>Settings:</b> Mode: <b>Medium</b> | Timer: <b>60s</b>\n\n"
         f"👉 {m2}, match shuru karne ke liye <b>Accept Challenge</b> par click karo!",
         reply_markup=kb,
@@ -1050,7 +1059,7 @@ async def stats_cmd(_, message: Message):
     mention = get_mention(message.from_user)
 
     await message.reply_text(
-        f"👤 {mention}\n\n"
+        f"👤 {mention} (<code>{message.from_user.id}</code>)\n\n"
         f"⭐ Points: <b>{u['points']}</b>\n"
         f"🧩 Solved: <b>{u['solved']}</b>\n"
         f"🔥 Streak: <b>{u['streak']}</b> (Best: {u['best_streak']})\n"
@@ -1060,21 +1069,93 @@ async def stats_cmd(_, message: Message):
         parse_mode=ParseMode.HTML
     )
 
-@app.on_message(filters.command("leaderboard"))
-async def leaderboard_cmd(_, message: Message):
-    rows = DB.execute("SELECT * FROM users ORDER BY points DESC LIMIT 10").fetchall()
-    if not rows:
-        return await message.reply_text("🏆 Leaderboard empty hai.")
+# ============================================================
+# DYNAMIC LEADERBOARD SYSTEM (DAILY, WEEKLY, MONTHLY, GLOBAL)
+# ============================================================
 
-    text = "🏆 <b>GLOBAL JUMBLE LEADERBOARD</b>\n\n"
+def build_leaderboard_text_and_kb(scope_type, chat_id):
+    now = time.time()
     medals = ["🥇", "🥈", "🥉"]
+    
+    if scope_type == "daily":
+        since = now - 86400
+        title = "📅 <b>DAILY GROUP LEADERBOARD (24h)</b>"
+        rows = DB.execute("""
+            SELECT h.user_id, u.name, u.username, SUM(h.points) as total_pts
+            FROM score_history h
+            JOIN users u ON h.user_id = u.user_id
+            WHERE h.chat_id = ? AND h.timestamp >= ?
+            GROUP BY h.user_id
+            ORDER BY total_pts DESC
+            LIMIT 10
+        """, (chat_id, since)).fetchall()
+        
+    elif scope_type == "weekly":
+        since = now - (86400 * 7)
+        title = "🗓️ <b>WEEKLY GROUP LEADERBOARD (7 Days)</b>"
+        rows = DB.execute("""
+            SELECT h.user_id, u.name, u.username, SUM(h.points) as total_pts
+            FROM score_history h
+            JOIN users u ON h.user_id = u.user_id
+            WHERE h.chat_id = ? AND h.timestamp >= ?
+            GROUP BY h.user_id
+            ORDER BY total_pts DESC
+            LIMIT 10
+        """, (chat_id, since)).fetchall()
 
-    for i, u in enumerate(rows, 1):
-        medal = medals[i - 1] if i <= 3 else f"<code>{i}.</code>"
-        m = get_mention(user_id=u['user_id'], first_name=u['name'], username=u['username'])
-        text += f"{medal} {m} — ⭐ <b>{u['points']} pts</b>\n"
+    elif scope_type == "monthly":
+        since = now - (86400 * 30)
+        title = "📆 <b>MONTHLY GLOBAL LEADERBOARD (30 Days)</b>"
+        rows = DB.execute("""
+            SELECT h.user_id, u.name, u.username, SUM(h.points) as total_pts
+            FROM score_history h
+            JOIN users u ON h.user_id = u.user_id
+            WHERE h.timestamp >= ?
+            GROUP BY h.user_id
+            ORDER BY total_pts DESC
+            LIMIT 10
+        """, (since,)).fetchall()
 
-    await message.reply_text(text, parse_mode=ParseMode.HTML)
+    else: # global
+        title = "🌍 <b>GLOBAL ALL-TIME LEADERBOARD</b>"
+        rows = DB.execute("""
+            SELECT user_id, name, username, points as total_pts
+            FROM users
+            ORDER BY points DESC
+            LIMIT 10
+        """).fetchall()
+
+    text = f"{title}\n\n"
+    if not rows:
+        text += "<i>Abhi tak koi score record nahi hua hai.</i>"
+    else:
+        for i, u in enumerate(rows, 1):
+            medal = medals[i - 1] if i <= 3 else f"<code>{i}.</code>"
+            m = get_mention(user_id=u['user_id'], first_name=u['name'], username=u['username'])
+            text += f"{medal} {m} (<code>{u['user_id']}</code>) — ⭐ <b>{u['total_pts']} pts</b>\n"
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"{'✅ ' if scope_type=='daily' else ''}📅 Daily (GC)", callback_data=f"lb_daily_{chat_id}"),
+            InlineKeyboardButton(f"{'✅ ' if scope_type=='weekly' else ''}🗓️ Weekly (GC)", callback_data=f"lb_weekly_{chat_id}")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if scope_type=='monthly' else ''}📆 Monthly (Global)", callback_data=f"lb_monthly_{chat_id}"),
+            InlineKeyboardButton(f"{'✅ ' if scope_type=='global' else ''}🌍 Global", callback_data=f"lb_global_{chat_id}")
+        ],
+        [
+            InlineKeyboardButton("❌ Close", callback_data="close_panel")
+        ]
+    ])
+
+    return text, kb
+
+@app.on_message(filters.command(["leaderboard", "top", "rank", "lb"]))
+async def leaderboard_cmd(_, message: Message):
+    chat_id = message.chat.id
+    scope = "daily" if is_group(message) else "global"
+    text, kb = build_leaderboard_text_and_kb(scope, chat_id)
+    await message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 # ============================================================
 # UNIFIED ANSWER HANDLER
@@ -1083,7 +1164,7 @@ async def leaderboard_cmd(_, message: Message):
 @app.on_message(
     filters.text &
     ~filters.command([
-        "start", "help", "jumble", "stats", "leaderboard",
+        "start", "help", "jumble", "stats", "leaderboard", "top", "rank", "lb",
         "jumblefight", "fight", "rapido", "settings", "setpoints",
         "addword", "delword", "word", "words", "auth", "unauth", "authlist", "update", "gitpull"
     ])
@@ -1119,7 +1200,7 @@ async def unified_answer_handler(_, message: Message):
 
                 u_mention = get_mention(message.from_user)
                 r_msg = await message.reply_text(
-                    f"⚡ {u_mention} <b>WON ROUND {game['round']}!</b>\n"
+                    f"⚡ {u_mention} (<code>{user_id}</code>) <b>WON ROUND {game['round']}!</b>\n"
                     f"🏆 Round Score: <b>{game['scores'][user_id]}</b>",
                     parse_mode=ParseMode.HTML
                 )
@@ -1150,11 +1231,18 @@ async def unified_answer_handler(_, message: Message):
         new_streak = u["streak"] + 1
         best = max(new_streak, u["best_streak"])
 
+        # Update Master Score
         DB.execute("""
             UPDATE users
             SET points=points+?, solved=solved+1, streak=?, best_streak=?
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
+        
+        # Track Time-series Score History
+        DB.execute("""
+            INSERT INTO score_history (user_id, chat_id, points, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, chat_id, pts_reward, time.time()))
         DB.commit()
 
         if settings["auto_delete"] and game["message_id"]:
@@ -1163,7 +1251,7 @@ async def unified_answer_handler(_, message: Message):
         u_mention = get_mention(message.from_user)
         c_msg = await message.reply_text(
             f"🎉 <b>CORRECT!</b>\n\n"
-            f"👤 {u_mention}\n"
+            f"👤 {u_mention} (<code>{user_id}</code>)\n"
             f"✅ Answer: <b>{game['word'].upper()}</b>\n"
             f"⭐ <b>+{pts_reward} points</b>\n"
             f"🔥 Current Streak: <b>{new_streak}</b>\n\n"
@@ -1245,6 +1333,24 @@ async def callback_router(_, query: CallbackQuery):
 
         return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {3 - p_hint['count']}/3", show_alert=True)
 
+    # ============================================================
+    # LEADERBOARD CALLBACK ROUTER
+    # ============================================================
+    elif data.startswith("lb_"):
+        await query.answer()
+        parts = data.split("_")
+        scope = parts[1]
+        target_chat = int(parts[2])
+
+        text, kb = build_leaderboard_text_and_kb(scope, target_chat)
+        try:
+            await query.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        except MessageNotModified:
+            pass
+
+    # ============================================================
+    # WORD BANK PAGINATED VIEWER
+    # ============================================================
     elif data.startswith("wb_"):
         await query.answer()
         if not is_authed(user_id):
@@ -1333,6 +1439,9 @@ async def callback_router(_, query: CallbackQuery):
         except Exception:
             pass
 
+    # ============================================================
+    # FIGHT ACCEPT & SETUP HANDLERS
+    # ============================================================
     elif data.startswith("f_"):
         lobby = FIGHT_LOBBY.get(chat_id)
         if not lobby:
@@ -1410,8 +1519,8 @@ async def callback_router(_, query: CallbackQuery):
         try:
             await query.message.edit_text(
                 f"⚔️ <b>JUMBLE FIGHT 1v1 CHALLENGE!</b>\n\n"
-                f"👤 <b>Challenger:</b> {lobby['m1']}\n"
-                f"🎯 <b>Target:</b> {lobby['m2']}\n\n"
+                f"👤 <b>Challenger:</b> {lobby['m1']} (<code>{lobby['p1']}</code>)\n"
+                f"🎯 <b>Target:</b> {lobby['m2']} (<code>{lobby['p2']}</code>)\n\n"
                 f"⚙️ <b>Settings:</b> Mode: <b>{lobby['difficulty'].title()}</b> | Timer: <b>{lobby['timer']}s</b>\n\n"
                 f"👉 {lobby['m2']}, match shuru karne ke liye <b>Accept Challenge</b> par click karo!",
                 reply_markup=kb,
