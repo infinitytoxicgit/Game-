@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
-from pyrogram.enums import ChatType, ChatMemberStatus
+from pyrogram.enums import ChatType, ChatMemberStatus, ParseMode
 from pyrogram.errors import MessageNotModified, RPCError
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
@@ -205,12 +205,12 @@ def get_user(user_id):
     return DB.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
 
 def is_owner(user_id):
-    return user_id == OWNER_ID
+    return int(user_id) == int(OWNER_ID)
 
 def is_authed(user_id):
     if is_owner(user_id):
         return True
-    row = DB.execute("SELECT user_id FROM auth_users WHERE user_id=?", (user_id,)).fetchone()
+    row = DB.execute("SELECT user_id FROM auth_users WHERE user_id=?", (int(user_id),)).fetchone()
     return bool(row)
 
 async def is_admin_or_owner(chat, user_id):
@@ -819,12 +819,13 @@ async def words_menu_cmd(_, message: Message):
     ])
 
     await message.reply_text(
-        "📚 **JUMBLE WORD BANK**\n\n"
-        f"🟢 **Easy Words:** `{len(WORDS['easy'])}`\n"
-        f"🟡 **Medium Words:** `{len(WORDS['medium'])}`\n"
-        f"🔴 **Hard Words:** `{len(WORDS['hard'])}`\n\n"
+        "📚 <b>JUMBLE WORD BANK</b>\n\n"
+        f"🟢 <b>Easy Words:</b> <code>{len(WORDS['easy'])}</code>\n"
+        f"🟡 <b>Medium Words:</b> <code>{len(WORDS['medium'])}</code>\n"
+        f"🔴 <b>Hard Words:</b> <code>{len(WORDS['hard'])}</code>\n\n"
         "Neeche buttons par click karke category ke words check karein (Single-tap copy supported):",
-        reply_markup=kb
+        reply_markup=kb,
+        parse_mode=ParseMode.HTML
     )
     asyncio.create_task(delete_after(message, 3))
 
@@ -1179,6 +1180,7 @@ async def callback_router(_, query: CallbackQuery):
     # WORD BANK PAGINATED VIEWER (WITH SINGLE TAP COPY)
     # ============================================================
     elif data.startswith("wb_"):
+        await query.answer()
         if not is_authed(user_id):
             return await query.answer("❌ Sirf Auth Users word bank dekh sakte hain.", show_alert=True)
 
@@ -1194,8 +1196,8 @@ async def callback_router(_, query: CallbackQuery):
         end_idx = start_idx + per_page
         page_words = word_list[start_idx:end_idx]
 
-        # Format words for easy single-tap copy
-        formatted_list = "  •  ".join(f"`{w.upper()}`" for w in page_words)
+        # Monospace HTML formatting for seamless copy
+        formatted_list = "  •  ".join(f"<code>{w.upper()}</code>" for w in page_words)
 
         nav_row = []
         if page > 1:
@@ -1218,21 +1220,20 @@ async def callback_router(_, query: CallbackQuery):
         ])
 
         msg = (
-            f"📚 **{diff.upper()} WORDS BANK** (Total: `{total_words}`)\n"
-            f"📌 *Tip: Tap on any word below to copy it!*\n\n"
+            f"📚 <b>{diff.upper()} WORDS BANK</b> (Total: <code>{total_words}</code>)\n"
+            f"📌 <i>Tip: Tap on any word below to copy it!</i>\n\n"
             f"{formatted_list}\n\n"
-            f"➕ Add: `/addword {diff} <word>`\n"
-            f"➖ Del: `/delword {diff} <word>`"
+            f"➕ Add: <code>/addword {diff} word</code>\n"
+            f"➖ Del: <code>/delword {diff} word</code>"
         )
 
-        await query.answer()
         try:
-            await query.message.edit_text(msg, reply_markup=kb)
+            await query.message.edit_text(msg, reply_markup=kb, parse_mode=ParseMode.HTML)
         except MessageNotModified:
             pass
         except Exception:
             try:
-                await app.send_message(chat_id, msg, reply_markup=kb)
+                await app.send_message(chat_id, msg, reply_markup=kb, parse_mode=ParseMode.HTML)
             except Exception:
                 pass
 
@@ -1240,6 +1241,7 @@ async def callback_router(_, query: CallbackQuery):
         await query.answer("Current Page Number", show_alert=False)
 
     elif data == "back_to_words_menu":
+        await query.answer()
         if not is_authed(user_id):
             return await query.answer("❌ Authorized users only.", show_alert=True)
 
@@ -1253,15 +1255,15 @@ async def callback_router(_, query: CallbackQuery):
                 InlineKeyboardButton("❌ Close", callback_data="close_panel")
             ]
         ])
-        await query.answer()
         try:
             await query.message.edit_text(
-                "📚 **JUMBLE WORD BANK**\n\n"
-                f"🟢 **Easy Words:** `{len(WORDS['easy'])}`\n"
-                f"🟡 **Medium Words:** `{len(WORDS['medium'])}`\n"
-                f"🔴 **Hard Words:** `{len(WORDS['hard'])}`\n\n"
+                "📚 <b>JUMBLE WORD BANK</b>\n\n"
+                f"🟢 <b>Easy Words:</b> <code>{len(WORDS['easy'])}</code>\n"
+                f"🟡 <b>Medium Words:</b> <code>{len(WORDS['medium'])}</code>\n"
+                f"🔴 <b>Hard Words:</b> <code>{len(WORDS['hard'])}</code>\n\n"
                 "Neeche buttons par click karke category ke words check karein (Single-tap copy supported):",
-                reply_markup=kb
+                reply_markup=kb,
+                parse_mode=ParseMode.HTML
             )
         except Exception:
             pass
