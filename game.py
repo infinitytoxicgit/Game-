@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS users (
     best_streak INTEGER DEFAULT 0,
     streak INTEGER DEFAULT 0,
     fight_wins INTEGER DEFAULT 0,
-    fight_losses INTEGER DEFAULT 0
+    fight_losses INTEGER DEFAULT 0,
+    is_private INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS auth_users (
@@ -178,6 +179,8 @@ def run_migrations():
         DB.execute("ALTER TABLE users ADD COLUMN fight_wins INTEGER DEFAULT 0")
     if "fight_losses" not in user_cols:
         DB.execute("ALTER TABLE users ADD COLUMN fight_losses INTEGER DEFAULT 0")
+    if "is_private" not in user_cols:
+        DB.execute("ALTER TABLE users ADD COLUMN is_private INTEGER DEFAULT 0")
     DB.commit()
 
 run_migrations()
@@ -624,6 +627,9 @@ async def start_cmd(_, message: Message):
         "• <code>/jumble</code> — Start Auto-loop Jumble Game\n"
         "• <code>/jumblefight @user</code> — 1v1 Battle Mode (with Accept Gate)\n"
         "• <code>/settings</code> — Admin Panel (Start/Stop, Mode, Auto-delete)\n\n"
+        "🛡️ <b>Privacy Settings:</b>\n"
+        "• <code>/private</code> — Hide ID/Tag on Leaderboard (Name only)\n"
+        "• <code>/public</code> — Show Tag & ID on Leaderboard\n\n"
         "📊 <b>Stats & Rankings:</b>\n"
         "• <code>/stats</code> — Your Performance\n"
         "• <code>/leaderboard</code> — Daily, Weekly, Monthly & Global Ranks\n"
@@ -651,7 +657,9 @@ async def help_cmd(_, message: Message):
         "<code>/jumblefight @user</code> — 1v1 battle match\n"
         "<code>/settings</code> — Admin start/stop and game settings\n"
         "<code>/leaderboard</code> — Top players ranking (Daily/Weekly/Monthly/Global)\n"
-        "<code>/stats</code> — Personal score card\n\n"
+        "<code>/stats</code> — Personal score card\n"
+        "<code>/private</code> — Hide tag & ID from leaderboard\n"
+        "<code>/public</code> — Show tag & ID on leaderboard\n\n"
         "💡 Har word par aapko <b>3 fresh hints</b> milti hain.\n"
     )
     if is_user_auth:
@@ -671,6 +679,36 @@ async def help_cmd(_, message: Message):
             "<code>/authlist</code> — List of authorized users\n"
         )
     await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+# ============================================================
+# PRIVACY SYSTEM (/private & /public)
+# ============================================================
+
+@app.on_message(filters.command("private"))
+async def private_cmd(_, message: Message):
+    ensure_user(message.from_user)
+    DB.execute("UPDATE users SET is_private=1 WHERE user_id=?", (message.from_user.id,))
+    DB.commit()
+
+    await message.reply_text(
+        "🔒 <b>Privacy Enabled!</b>\n\n"
+        "Leaderboard par aapka <b>Tag, Link aur User ID hide</b> kar diya gaya hai. Sirf aapka plain name dikhega.\n"
+        "Wapas tag show karne ke liye <code>/public</code> use karein.",
+        parse_mode=ParseMode.HTML
+    )
+
+@app.on_message(filters.command("public"))
+async def public_cmd(_, message: Message):
+    ensure_user(message.from_user)
+    DB.execute("UPDATE users SET is_private=0 WHERE user_id=?", (message.from_user.id,))
+    DB.commit()
+
+    await message.reply_text(
+        "🌐 <b>Public Mode Enabled!</b>\n\n"
+        "Leaderboard par aapka <b>Username, Tag Link aur User ID</b> display hoga.\n"
+        "Hide karne ke liye <code>/private</code> use karein.",
+        parse_mode=ParseMode.HTML
+    )
 
 # ============================================================
 # GIT UPDATER (AUTH / OWNER ONLY)
@@ -1057,21 +1095,32 @@ async def stats_cmd(_, message: Message):
     total = u["fight_wins"] + u["fight_losses"]
     winrate = ((u["fight_wins"] / total) * 100) if total else 0
     mention = get_mention(message.from_user)
+    priv_status = "🔒 Private" if u["is_private"] else "🌐 Public"
 
     await message.reply_text(
         f"👤 {mention} (<code>{message.from_user.id}</code>)\n\n"
         f"⭐ Points: <b>{u['points']}</b>\n"
         f"🧩 Solved: <b>{u['solved']}</b>\n"
         f"🔥 Streak: <b>{u['streak']}</b> (Best: {u['best_streak']})\n"
-        f"💡 Hints: <b>3 per puzzle</b>\n\n"
+        f"💡 Hints: <b>3 per puzzle</b>\n"
+        f"🛡️ Privacy: <b>{priv_status}</b>\n\n"
         f"⚔️ Jumble Fight: <b>{u['fight_wins']}W - {u['fight_losses']}L</b>\n"
         f"📈 Win Rate: <b>{winrate:.1f}%</b>",
         parse_mode=ParseMode.HTML
     )
 
 # ============================================================
-# DYNAMIC LEADERBOARD SYSTEM (DAILY, WEEKLY, MONTHLY, GLOBAL)
+# DYNAMIC LEADERBOARD SYSTEM (WITH PRIVACY CHECKS)
 # ============================================================
+
+def format_lb_entry(user_id, name, username, is_private):
+    clean_name = (name or "Player").replace("<", "&lt;").replace(">", "&gt;")
+    if is_private:
+        return f"<b>{clean_name}</b>"
+    
+    if username:
+        return f"<a href='https://t.me/{username}'>{clean_name}</a> (<code>{user_id}</code>)"
+    return f"<a href='tg://openmessage?user_id={user_id}'>{clean_name}</a> (<code>{user_id}</code>)"
 
 def build_leaderboard_text_and_kb(scope_type, chat_id):
     now = time.time()
@@ -1081,7 +1130,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
         since = now - 86400
         title = "📅 <b>DAILY GROUP LEADERBOARD (24h)</b>"
         rows = DB.execute("""
-            SELECT h.user_id, u.name, u.username, SUM(h.points) as total_pts
+            SELECT h.user_id, u.name, u.username, u.is_private, SUM(h.points) as total_pts
             FROM score_history h
             JOIN users u ON h.user_id = u.user_id
             WHERE h.chat_id = ? AND h.timestamp >= ?
@@ -1094,7 +1143,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
         since = now - (86400 * 7)
         title = "🗓️ <b>WEEKLY GROUP LEADERBOARD (7 Days)</b>"
         rows = DB.execute("""
-            SELECT h.user_id, u.name, u.username, SUM(h.points) as total_pts
+            SELECT h.user_id, u.name, u.username, u.is_private, SUM(h.points) as total_pts
             FROM score_history h
             JOIN users u ON h.user_id = u.user_id
             WHERE h.chat_id = ? AND h.timestamp >= ?
@@ -1107,7 +1156,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
         since = now - (86400 * 30)
         title = "📆 <b>MONTHLY GLOBAL LEADERBOARD (30 Days)</b>"
         rows = DB.execute("""
-            SELECT h.user_id, u.name, u.username, SUM(h.points) as total_pts
+            SELECT h.user_id, u.name, u.username, u.is_private, SUM(h.points) as total_pts
             FROM score_history h
             JOIN users u ON h.user_id = u.user_id
             WHERE h.timestamp >= ?
@@ -1119,7 +1168,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
     else: # global
         title = "🌍 <b>GLOBAL ALL-TIME LEADERBOARD</b>"
         rows = DB.execute("""
-            SELECT user_id, name, username, points as total_pts
+            SELECT user_id, name, username, is_private, points as total_pts
             FROM users
             ORDER BY points DESC
             LIMIT 10
@@ -1131,8 +1180,8 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
     else:
         for i, u in enumerate(rows, 1):
             medal = medals[i - 1] if i <= 3 else f"<code>{i}.</code>"
-            m = get_mention(user_id=u['user_id'], first_name=u['name'], username=u['username'])
-            text += f"{medal} {m} (<code>{u['user_id']}</code>) — ⭐ <b>{u['total_pts']} pts</b>\n"
+            user_entry = format_lb_entry(u['user_id'], u['name'], u['username'], u['is_private'])
+            text += f"{medal} {user_entry} — ⭐ <b>{u['total_pts']} pts</b>\n"
 
     kb = InlineKeyboardMarkup([
         [
@@ -1165,7 +1214,7 @@ async def leaderboard_cmd(_, message: Message):
     filters.text &
     ~filters.command([
         "start", "help", "jumble", "stats", "leaderboard", "top", "rank", "lb",
-        "jumblefight", "fight", "rapido", "settings", "setpoints",
+        "jumblefight", "fight", "rapido", "settings", "setpoints", "private", "public",
         "addword", "delword", "word", "words", "auth", "unauth", "authlist", "update", "gitpull"
     ])
 )
