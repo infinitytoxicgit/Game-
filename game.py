@@ -15,7 +15,7 @@ from pyrogram.errors import MessageNotModified, RPCError
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 # ============================================================
-# CONFIG & ENV SETUP
+# CONFIG & HARDCODED CREDENTIALS
 # ============================================================
 
 try:
@@ -24,10 +24,10 @@ try:
 except ImportError:
     pass
 
-API_ID = int(os.getenv("API_ID", "123456"))
-API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
+API_ID = 35218869
+API_HASH = "80baadcfd00a39a0ff1f5f529d23156f"
+OWNER_ID = 8564072723
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 
 START_IMG = "https://graph.org/file/7c0c03d68308f0c5dad42-ddb933df03f0ff0632.jpg"
 SUPPORT_GC = "https://t.me/Roohi_Soul_Gc"
@@ -623,7 +623,7 @@ async def help_cmd(_, message: Message):
     if is_user_auth:
         text += (
             "\n🔐 **Auth / Word Bank Commands:**\n"
-            "`/word` — View categorized word bank\n"
+            "`/word` — View categorized word bank (with Pagination & Single-tap copy)\n"
             "`/addword easy word` — Add new word to bank\n"
             "`/delword easy word` — Delete word from bank\n"
             "`/update` — Update bot from GitHub repository\n"
@@ -809,9 +809,9 @@ async def words_menu_cmd(_, message: Message):
 
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"🟢 Easy ({len(WORDS['easy'])})", callback_data="view_words_easy"),
-            InlineKeyboardButton(f"🟡 Medium ({len(WORDS['medium'])})", callback_data="view_words_medium"),
-            InlineKeyboardButton(f"🔴 Hard ({len(WORDS['hard'])})", callback_data="view_words_hard")
+            InlineKeyboardButton(f"🟢 Easy ({len(WORDS['easy'])})", callback_data="wb_easy_1"),
+            InlineKeyboardButton(f"🟡 Medium ({len(WORDS['medium'])})", callback_data="wb_medium_1"),
+            InlineKeyboardButton(f"🔴 Hard ({len(WORDS['hard'])})", callback_data="wb_hard_1")
         ],
         [
             InlineKeyboardButton("❌ Close", callback_data="close_panel")
@@ -823,7 +823,7 @@ async def words_menu_cmd(_, message: Message):
         f"🟢 **Easy Words:** `{len(WORDS['easy'])}`\n"
         f"🟡 **Medium Words:** `{len(WORDS['medium'])}`\n"
         f"🔴 **Hard Words:** `{len(WORDS['hard'])}`\n\n"
-        "Neeche buttons par click karke category ke words check karein:",
+        "Neeche buttons par click karke category ke words check karein (Single-tap copy supported):",
         reply_markup=kb
     )
     asyncio.create_task(delete_after(message, 3))
@@ -1175,45 +1175,69 @@ async def callback_router(_, query: CallbackQuery):
 
         return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {3 - p_hint['count']}/3", show_alert=True)
 
-    elif data.startswith("view_words_"):
+    # ============================================================
+    # WORD BANK PAGINATED VIEWER (WITH SINGLE TAP COPY)
+    # ============================================================
+    elif data.startswith("wb_"):
         if not is_authed(user_id):
             return await query.answer("❌ Sirf Auth Users word bank dekh sakte hain.", show_alert=True)
 
-        diff = data.split("_")[2]
+        _, diff, page_str = data.split("_")
+        page = int(page_str)
         word_list = sorted(WORDS.get(diff, []))
-        total_count = len(word_list)
-        
-        words_formatted = ", ".join(w.upper() for w in word_list)
-        if len(words_formatted) > 3000:
-            words_formatted = words_formatted[:3000] + " ...[truncated]"
+        total_words = len(word_list)
+        per_page = 20
+        total_pages = max(1, (total_words + per_page - 1) // per_page)
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_words = word_list[start_idx:end_idx]
+
+        # Format words for easy single-tap copy
+        formatted_list = "  •  ".join(f"`{w.upper()}`" for w in page_words)
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"wb_{diff}_{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"📄 {page}/{total_pages}", callback_data="noop_page"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"wb_{diff}_{page + 1}"))
 
         kb = InlineKeyboardMarkup([
+            nav_row,
             [
-                InlineKeyboardButton("🟢 Easy", callback_data="view_words_easy"),
-                InlineKeyboardButton("🟡 Medium", callback_data="view_words_medium"),
-                InlineKeyboardButton("🔴 Hard", callback_data="view_words_hard")
+                InlineKeyboardButton("🟢 Easy", callback_data="wb_easy_1"),
+                InlineKeyboardButton("🟡 Medium", callback_data="wb_medium_1"),
+                InlineKeyboardButton("🔴 Hard", callback_data="wb_hard_1")
             ],
             [
-                InlineKeyboardButton("🔙 Back to Bank", callback_data="back_to_words_menu"),
+                InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_words_menu"),
                 InlineKeyboardButton("❌ Close", callback_data="close_panel")
             ]
         ])
 
         msg = (
-            f"📚 **Category: {diff.upper()} ({total_count} Words)**\n\n"
-            f"`{words_formatted}`\n\n"
+            f"📚 **{diff.upper()} WORDS BANK** (Total: `{total_words}`)\n"
+            f"📌 *Tip: Tap on any word below to copy it!*\n\n"
+            f"{formatted_list}\n\n"
             f"➕ Add: `/addword {diff} <word>`\n"
             f"➖ Del: `/delword {diff} <word>`"
         )
-        
+
         await query.answer()
         try:
             await query.message.edit_text(msg, reply_markup=kb)
+        except MessageNotModified:
+            pass
         except Exception:
             try:
-                await app.send_message(user_id, msg, reply_markup=kb)
+                await app.send_message(chat_id, msg, reply_markup=kb)
             except Exception:
                 pass
+
+    elif data == "noop_page":
+        await query.answer("Current Page Number", show_alert=False)
 
     elif data == "back_to_words_menu":
         if not is_authed(user_id):
@@ -1221,9 +1245,9 @@ async def callback_router(_, query: CallbackQuery):
 
         kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(f"🟢 Easy ({len(WORDS['easy'])})", callback_data="view_words_easy"),
-                InlineKeyboardButton(f"🟡 Medium ({len(WORDS['medium'])})", callback_data="view_words_medium"),
-                InlineKeyboardButton(f"🔴 Hard ({len(WORDS['hard'])})", callback_data="view_words_hard")
+                InlineKeyboardButton(f"🟢 Easy ({len(WORDS['easy'])})", callback_data="wb_easy_1"),
+                InlineKeyboardButton(f"🟡 Medium ({len(WORDS['medium'])})", callback_data="wb_medium_1"),
+                InlineKeyboardButton(f"🔴 Hard ({len(WORDS['hard'])})", callback_data="wb_hard_1")
             ],
             [
                 InlineKeyboardButton("❌ Close", callback_data="close_panel")
@@ -1236,7 +1260,7 @@ async def callback_router(_, query: CallbackQuery):
                 f"🟢 **Easy Words:** `{len(WORDS['easy'])}`\n"
                 f"🟡 **Medium Words:** `{len(WORDS['medium'])}`\n"
                 f"🔴 **Hard Words:** `{len(WORDS['hard'])}`\n\n"
-                "Neeche buttons par click karke category ke words check karein:",
+                "Neeche buttons par click karke category ke words check karein (Single-tap copy supported):",
                 reply_markup=kb
             )
         except Exception:
