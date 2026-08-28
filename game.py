@@ -24,10 +24,10 @@ try:
 except ImportError:
     pass
 
-API_ID = int(os.getenv("API_ID", "35218869"))
-API_HASH = os.getenv("API_HASH", "80baadcfd00a39a0ff1f5f529d23156f")
+API_ID = int(os.getenv("API_ID", "123456"))
+API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "8564072723"))
+OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 
 START_IMG = "https://graph.org/file/7c0c03d68308f0c5dad42-ddb933df03f0ff0632.jpg"
 SUPPORT_GC = "https://t.me/Roohi_Soul_Gc"
@@ -325,6 +325,18 @@ async def delete_after(msg: Message, delay: int = 5):
     except Exception:
         pass
 
+async def safe_delete_and_unpin(chat_id: int, message_id: int):
+    if not message_id:
+        return
+    try:
+        await app.unpin_chat_message(chat_id, message_id)
+    except Exception:
+        pass
+    try:
+        await app.delete_messages(chat_id, message_id)
+    except Exception:
+        pass
+
 # ============================================================
 # NORMAL GAME CORE
 # ============================================================
@@ -347,6 +359,10 @@ async def start_game(chat_id, difficulty, message_or_chat):
     settings = get_settings(chat_id)
     if not settings["is_active"]:
         return
+
+    old_game = DB.execute("SELECT message_id FROM games WHERE chat_id=?", (chat_id,)).fetchone()
+    if old_game and settings["auto_delete"] and old_game["message_id"]:
+        await safe_delete_and_unpin(chat_id, old_game["message_id"])
 
     DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
 
@@ -405,10 +421,7 @@ async def expire_game(chat_id, puzzle_id, expires, difficulty):
 
     s = get_settings(chat_id)
     if s["auto_delete"] and row["message_id"]:
-        try:
-            await app.delete_messages(chat_id, row["message_id"])
-        except Exception:
-            pass
+        await safe_delete_and_unpin(chat_id, row["message_id"])
 
     try:
         exp_msg = await app.send_message(
@@ -447,12 +460,18 @@ async def fight_timeout_task(chat_id, round_num, timer_duration):
         game = JUMBLE_FIGHT.get(chat_id)
         if game and game["round"] == round_num:
             word = game["word"]
+            
+            s = get_settings(chat_id)
+            if s["auto_delete"] and game.get("msg_id"):
+                await safe_delete_and_unpin(chat_id, game["msg_id"])
+
             try:
                 t_msg = await app.send_message(
                     chat_id,
                     f"⏰ **Round {round_num} Timeout!**\n❌ Kisi ne solve nahi kiya.\n✅ Answer: **{word.upper()}**\n\n🔄 Next round starting..."
                 )
-                asyncio.create_task(delete_after(t_msg, 4))
+                if s["auto_delete"]:
+                    asyncio.create_task(delete_after(t_msg, 4))
             except Exception:
                 pass
             should_advance = True
@@ -522,6 +541,10 @@ async def finish_fight(chat_id):
             game["task"].cancel()
         except Exception:
             pass
+
+    s = get_settings(chat_id)
+    if s["auto_delete"] and game.get("msg_id"):
+        await safe_delete_and_unpin(chat_id, game["msg_id"])
 
     p1, p2 = game["players"]
     s1, s2 = game["scores"][p1], game["scores"][p2]
@@ -716,7 +739,7 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# WORD BANK MANAGEMENT (AUTO CLEANUP)
+# WORD BANK MANAGEMENT
 # ============================================================
 
 @app.on_message(filters.command("addword"))
@@ -1023,11 +1046,18 @@ async def unified_answer_handler(_, message: Message):
                         pass
 
                 game["scores"][user_id] += 1
+                
+                s = get_settings(chat_id)
+                if s["auto_delete"] and game.get("msg_id"):
+                    await safe_delete_and_unpin(chat_id, game["msg_id"])
+
                 r_msg = await message.reply_text(
                     f"⚡ **{message.from_user.first_name} WON ROUND {game['round']}!**\n"
                     f"🏆 Round Score: {game['scores'][user_id]}"
                 )
-                asyncio.create_task(delete_after(r_msg, 4))
+                if s["auto_delete"]:
+                    asyncio.create_task(delete_after(r_msg, 4))
+                    
                 await asyncio.sleep(2.5)
                 asyncio.create_task(fight_next(chat_id))
                 return
@@ -1060,10 +1090,7 @@ async def unified_answer_handler(_, message: Message):
         DB.commit()
 
         if settings["auto_delete"] and game["message_id"]:
-            try:
-                await app.delete_messages(chat_id, game["message_id"])
-            except Exception:
-                pass
+            await safe_delete_and_unpin(chat_id, game["message_id"])
 
         c_msg = await message.reply_text(
             f"🎉 **CORRECT!**\n\n"
@@ -1156,9 +1183,9 @@ async def callback_router(_, query: CallbackQuery):
         word_list = sorted(WORDS.get(diff, []))
         total_count = len(word_list)
         
-        sample_words = ", ".join(w.upper() for w in word_list[:50])
-        if total_count > 50:
-            sample_words += f" ...and {total_count - 50} more"
+        words_formatted = ", ".join(w.upper() for w in word_list)
+        if len(words_formatted) > 3000:
+            words_formatted = words_formatted[:3000] + " ...[truncated]"
 
         kb = InlineKeyboardMarkup([
             [
@@ -1173,15 +1200,20 @@ async def callback_router(_, query: CallbackQuery):
         ])
 
         msg = (
-            f"📚 **Category: {diff.upper()} ({total_count} Total)**\n\n"
-            f"**Words List:**\n`{sample_words}`\n\n"
+            f"📚 **Category: {diff.upper()} ({total_count} Words)**\n\n"
+            f"`{words_formatted}`\n\n"
             f"➕ Add: `/addword {diff} <word>`\n"
             f"➖ Del: `/delword {diff} <word>`"
         )
+        
+        await query.answer()
         try:
             await query.message.edit_text(msg, reply_markup=kb)
-        except MessageNotModified:
-            pass
+        except Exception:
+            try:
+                await app.send_message(user_id, msg, reply_markup=kb)
+            except Exception:
+                pass
 
     elif data == "back_to_words_menu":
         if not is_authed(user_id):
@@ -1197,6 +1229,7 @@ async def callback_router(_, query: CallbackQuery):
                 InlineKeyboardButton("❌ Close", callback_data="close_panel")
             ]
         ])
+        await query.answer()
         try:
             await query.message.edit_text(
                 "📚 **JUMBLE WORD BANK**\n\n"
@@ -1206,7 +1239,7 @@ async def callback_router(_, query: CallbackQuery):
                 "Neeche buttons par click karke category ke words check karein:",
                 reply_markup=kb
             )
-        except MessageNotModified:
+        except Exception:
             pass
 
     elif data.startswith("f_"):
@@ -1282,6 +1315,10 @@ async def callback_router(_, query: CallbackQuery):
 
         elif data == "set_stop_game":
             DB.execute("UPDATE settings SET is_active=0 WHERE chat_id=?", (chat_id,))
+            old_g = DB.execute("SELECT message_id FROM games WHERE chat_id=?", (chat_id,)).fetchone()
+            s = get_settings(chat_id)
+            if old_g and s["auto_delete"] and old_g["message_id"]:
+                await safe_delete_and_unpin(chat_id, old_g["message_id"])
             DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
             DB.commit()
             await query.answer("⏹️ Game stopped!")
@@ -1360,10 +1397,7 @@ async def callback_router(_, query: CallbackQuery):
         
         s = get_settings(chat_id)
         if s["auto_delete"] and game["message_id"]:
-            try:
-                await app.delete_messages(chat_id, game["message_id"])
-            except Exception:
-                pass
+            await safe_delete_and_unpin(chat_id, game["message_id"])
 
         sk_msg = await query.message.reply_text(f"⏭️ **Skipped!**\nAnswer: **{game['word'].upper()}**\n\n🔄 Next puzzle starting in 3 seconds...")
         if s["auto_delete"]:
