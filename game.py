@@ -113,7 +113,9 @@ CREATE TABLE IF NOT EXISTS settings (
     easy INTEGER DEFAULT 120,
     medium INTEGER DEFAULT 300,
     hard INTEGER DEFAULT 600,
-    points_per_word INTEGER DEFAULT 10,
+    points_easy INTEGER DEFAULT 10,
+    points_medium INTEGER DEFAULT 20,
+    points_hard INTEGER DEFAULT 30,
     default_diff TEXT DEFAULT 'medium',
     is_active INTEGER DEFAULT 1,
     auto_delete INTEGER DEFAULT 0
@@ -152,8 +154,12 @@ def run_migrations():
     cols = [c[1] for c in DB.execute("PRAGMA table_info(settings)").fetchall()]
     if "default_diff" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN default_diff TEXT DEFAULT 'medium'")
-    if "points_per_word" not in cols:
-        DB.execute("ALTER TABLE settings ADD COLUMN points_per_word INTEGER DEFAULT 10")
+    if "points_easy" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN points_easy INTEGER DEFAULT 10")
+    if "points_medium" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN points_medium INTEGER DEFAULT 20")
+    if "points_hard" not in cols:
+        DB.execute("ALTER TABLE settings ADD COLUMN points_hard INTEGER DEFAULT 30")
     if "is_active" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN is_active INTEGER DEFAULT 1")
     if "auto_delete" not in cols:
@@ -228,8 +234,8 @@ def get_settings(chat_id):
     row = DB.execute("SELECT * FROM settings WHERE chat_id=?", (chat_id,)).fetchone()
     if not row:
         DB.execute("""
-            INSERT INTO settings(chat_id, easy, medium, hard, points_per_word, default_diff, is_active, auto_delete)
-            VALUES (?, 120, 300, 600, 10, 'medium', 1, 0)
+            INSERT INTO settings(chat_id, easy, medium, hard, points_easy, points_medium, points_hard, default_diff, is_active, auto_delete)
+            VALUES (?, 120, 300, 600, 10, 20, 30, 'medium', 1, 0)
             ON CONFLICT(chat_id) DO NOTHING
         """, (chat_id,))
         DB.commit()
@@ -385,6 +391,7 @@ async def start_game(chat_id, difficulty, message_or_chat):
     puzzle_id = random.randint(10000, 99999)
     now = time.time()
     timer_val = settings[difficulty]
+    reward_pts = settings[f"points_{difficulty}"]
     expires = now + timer_val
 
     DB.execute("""
@@ -398,7 +405,7 @@ async def start_game(chat_id, difficulty, message_or_chat):
         f"🧩 <b>Jumble #{puzzle_id}</b>\n\n"
         f"🎯 Difficulty: <b>{difficulty.title()}</b>\n"
         f"⏱️ Time: <b>{timer_val // 60} min {timer_val % 60} sec</b>\n"
-        f"⭐ Reward: <b>+{settings['points_per_word']} Points</b>\n\n"
+        f"⭐ Reward: <b>+{reward_pts} Points</b>\n\n"
         f"🔀 Unscramble the letters!\n"
         f"💬 Type your answer in the chat."
     )
@@ -454,7 +461,7 @@ async def expire_game(chat_id, puzzle_id, expires, difficulty):
         asyncio.create_task(start_game(chat_id, difficulty, chat_id))
 
 # ============================================================
-# JUMBLE FIGHT (1v1 BATTLE SYSTEM WITH ACCEPT GATE)
+# JUMBLE FIGHT (1v1 BATTLE SYSTEM)
 # ============================================================
 
 JUMBLE_FIGHT = {}
@@ -606,7 +613,7 @@ async def start_cmd(_, message: Message):
         "🧩 <b>Welcome to Advanced Jumble Bot!</b>\n\n"
         "🎮 <b>Game Commands:</b>\n"
         "• <code>/jumble</code> — Start Auto-loop Jumble Game\n"
-        "• <code>/jumblefight @user</code> — 1v1 Battle Mode (with Accept Challenge)\n"
+        "• <code>/jumblefight @user</code> — 1v1 Battle Mode (with Accept Gate)\n"
         "• <code>/settings</code> — Admin Panel (Start/Stop, Mode, Auto-delete)\n\n"
         "📊 <b>Stats & Rankings:</b>\n"
         "• <code>/stats</code> — Your Performance\n"
@@ -644,6 +651,7 @@ async def help_cmd(_, message: Message):
             "<code>/word</code> — View categorized word bank (with Pagination & Single-tap copy)\n"
             "<code>/addword easy word</code> — Add new word to bank\n"
             "<code>/delword easy word</code> — Delete word from bank\n"
+            "<code>/setpoints [easy|medium|hard] [points]</code> — Set category points\n"
             "<code>/update</code> — Update bot from GitHub repository\n"
         )
     if is_owner(message.from_user.id):
@@ -652,7 +660,6 @@ async def help_cmd(_, message: Message):
             "<code>/auth @user</code> — Grant auth access\n"
             "<code>/unauth @user</code> — Revoke auth access\n"
             "<code>/authlist</code> — List of authorized users\n"
-            "<code>/setpoints 20</code> — Set per-word reward\n"
         )
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -855,6 +862,53 @@ async def words_menu_cmd(_, message: Message):
 # GAME & SETTINGS COMMANDS
 # ============================================================
 
+@app.on_message(filters.command("setpoints"))
+async def set_points(_, message: Message):
+    if not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Auth users points reward change kar sakte hain.")
+
+    args = message.command[1:]
+    get_settings(message.chat.id)
+
+    if len(args) == 1:
+        try:
+            pts = int(args[0])
+        except ValueError:
+            return await message.reply_text("❌ Invalid points number.")
+        
+        DB.execute("""
+            UPDATE settings 
+            SET points_easy=?, points_medium=?, points_hard=?
+            WHERE chat_id=?
+        """, (pts, pts, pts, message.chat.id))
+        DB.commit()
+        return await message.reply_text(f"✅ Sabhi categories (Easy, Medium, Hard) ke liye reward <b>{pts} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
+
+    elif len(args) == 2:
+        category = args[0].lower()
+        if category not in ("easy", "medium", "hard"):
+            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
+
+        try:
+            pts = int(args[1])
+        except ValueError:
+            return await message.reply_text("❌ Invalid points number.")
+
+        col = f"points_{category}"
+        DB.execute(f"UPDATE settings SET {col}=? WHERE chat_id=?", (pts, message.chat.id))
+        DB.commit()
+        return await message.reply_text(f"✅ <b>{category.title()}</b> category ke liye reward <b>{pts} points</b> set kar diya gaya.", parse_mode=ParseMode.HTML)
+
+    else:
+        return await message.reply_text(
+            "<b>Usage:</b>\n"
+            "• <code>/setpoints 20</code> — Sabhi categories ke liye\n"
+            "• <code>/setpoints easy 10</code> — Sirf Easy ke liye\n"
+            "• <code>/setpoints medium 25</code> — Sirf Medium ke liye\n"
+            "• <code>/setpoints hard 50</code> — Sirf Hard ke liye",
+            parse_mode=ParseMode.HTML
+        )
+
 @app.on_message(filters.command("settings"))
 async def settings_cmd(_, message: Message):
     if not await is_admin_or_owner(message.chat, message.from_user.id):
@@ -883,8 +937,8 @@ async def settings_cmd(_, message: Message):
         f"🟢 Game Status: <b>{'Running' if s['is_active'] else 'Stopped'}</b>\n"
         f"🗑️ Auto Delete Old: <b>{'Enabled' if s['auto_delete'] else 'Disabled'}</b>\n"
         f"🎯 Default Mode: <b>{str(cur_diff).title()}</b>\n"
-        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Medium: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
-        f"⭐ Reward per word: <b>{s['points_per_word']} pts</b>",
+        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
+        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>",
         reply_markup=kb,
         parse_mode=ParseMode.HTML
     )
@@ -1022,28 +1076,6 @@ async def leaderboard_cmd(_, message: Message):
 
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
-@app.on_message(filters.command("setpoints"))
-async def set_points(_, message: Message):
-    if not is_owner(message.from_user.id):
-        return await message.reply_text("❌ Sirf Owner points reward change kar sakta hai.")
-
-    if len(message.command) != 2:
-        return await message.reply_text("Usage: <code>/setpoints 20</code>", parse_mode=ParseMode.HTML)
-
-    try:
-        points = int(message.command[1])
-    except ValueError:
-        return await message.reply_text("❌ Invalid points number.")
-
-    DB.execute("""
-        INSERT INTO settings(chat_id, points_per_word)
-        VALUES (?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET points_per_word=excluded.points_per_word
-    """, (message.chat.id, points))
-    DB.commit()
-
-    await message.reply_text(f"✅ Is chat mein per word reward <b>{points} points</b> set kar diya.", parse_mode=ParseMode.HTML)
-
 # ============================================================
 # UNIFIED ANSWER HANDLER
 # ============================================================
@@ -1113,7 +1145,7 @@ async def unified_answer_handler(_, message: Message):
         ensure_user(message.from_user)
         u = get_user(user_id)
         settings = get_settings(chat_id)
-        pts_reward = settings["points_per_word"]
+        pts_reward = settings[f"points_{game['difficulty']}"]
 
         new_streak = u["streak"] + 1
         best = max(new_streak, u["best_streak"])
@@ -1213,9 +1245,6 @@ async def callback_router(_, query: CallbackQuery):
 
         return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {3 - p_hint['count']}/3", show_alert=True)
 
-    # ============================================================
-    # WORD BANK PAGINATED VIEWER
-    # ============================================================
     elif data.startswith("wb_"):
         await query.answer()
         if not is_authed(user_id):
@@ -1304,9 +1333,6 @@ async def callback_router(_, query: CallbackQuery):
         except Exception:
             pass
 
-    # ============================================================
-    # FIGHT ACCEPT & SETUP HANDLERS
-    # ============================================================
     elif data.startswith("f_"):
         lobby = FIGHT_LOBBY.get(chat_id)
         if not lobby:
@@ -1539,8 +1565,8 @@ async def show_settings_panel(message_obj, chat_id):
         f"🟢 Game Status: <b>{'Running' if s['is_active'] else 'Stopped'}</b>\n"
         f"🗑️ Auto Delete Old: <b>{'Enabled' if s['auto_delete'] else 'Disabled'}</b>\n"
         f"🎯 Default Mode: <b>{str(cur_diff).title()}</b>\n"
-        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Medium: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
-        f"⭐ Reward per word: <b>{s['points_per_word']} pts</b>"
+        f"⏱️ Timers: Easy: <b>{s['easy']}s</b> | Med: <b>{s['medium']}s</b> | Hard: <b>{s['hard']}s</b>\n"
+        f"⭐ Rewards: Easy: <b>{s['points_easy']}pts</b> | Med: <b>{s['points_medium']}pts</b> | Hard: <b>{s['points_hard']}pts</b>"
     )
     try:
         await message_obj.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
