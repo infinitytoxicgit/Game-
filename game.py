@@ -421,7 +421,6 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
 @app.on_chat_member_updated()
 async def bot_added_handler(_, update: ChatMemberUpdated):
     if update.new_chat_member and update.new_chat_member.user and update.new_chat_member.user.is_self:
-        # Bot added or updated in chat
         if update.from_user and not update.from_user.is_bot:
             chat_id = update.chat.id
             user_id = update.from_user.id
@@ -501,7 +500,7 @@ async def start_game(chat_id, difficulty, message_or_chat):
         except Exception:
             pass
     except Exception as e:
-        print(f"Error sending puzzle: {e}")
+        print(f"Error sending puzzle to {chat_id}: {e}")
 
     asyncio.create_task(expire_game(chat_id, puzzle_id, expires, difficulty))
 
@@ -1098,29 +1097,24 @@ async def bonus_cmd(_, message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
 
-    # 1. Verify Bot Admin Rights & get who promoted the bot
     promoted_by_user_id = None
     try:
         bot_member = await message.chat.get_member("me")
         if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
             return await message.reply_text("<blockquote>⚠️ <b>Bonus claim karne ke liye pehle bot ko is group mein Admin Rights dein!</b></blockquote>", parse_mode=ParseMode.HTML)
         
-        # Pyrogram promoted_by_user extraction
         if getattr(bot_member, "promoted_by", None):
             promoted_by_user_id = bot_member.promoted_by.id
     except Exception:
         return await message.reply_text("<blockquote>❌ <b>Bot ke admin permissions verify nahi ho sake. Kripya bot ko Admin banayein.</b></blockquote>", parse_mode=ParseMode.HTML)
 
-    # 2. Check if this group bonus has already been claimed
     claimed = DB.execute("SELECT * FROM group_bonus WHERE chat_id=?", (chat_id,)).fetchone()
     if claimed:
         return await message.reply_text("<blockquote>⚠️ <b>Is group ka bonus already claim kiya ja chuka hai!</b></blockquote>", parse_mode=ParseMode.HTML)
 
-    # 3. Verify that the command sender is the actual person who added or promoted the bot
     adder_row = DB.execute("SELECT user_id FROM group_adders WHERE chat_id=?", (chat_id,)).fetchone()
     valid_claimant_id = adder_row["user_id"] if adder_row else promoted_by_user_id
 
-    # If tracker is missing, auto-bind to the admin who is currently calling /bonus
     if not valid_claimant_id:
         try:
             member = await message.chat.get_member(user_id)
@@ -1500,7 +1494,7 @@ async def jumble_fight_cmd(_, message: Message):
     )
 
 # ============================================================
-# UNIFIED ANSWER HANDLER
+# UNIFIED ANSWER HANDLER (BYPASSES ALL '/' COMMANDS)
 # ============================================================
 
 @app.on_message(filters.text & ~filters.regex(r"^/"))
@@ -2026,21 +2020,26 @@ async def show_settings_panel(message_obj, chat_id):
         pass
 
 # ============================================================
-# AUTO-RESUME GAMES ON BOT STARTUP
+# AUTO-RESUME GAMES ON BOT STARTUP (RELIABLE & SEQUENTIAL)
 # ============================================================
 
 async def resume_all_active_games():
-    await asyncio.sleep(4)
-    rows = DB.execute("SELECT chat_id, default_diff FROM settings WHERE is_active = 1").fetchall()
+    await asyncio.sleep(3)
+    rows = DB.execute("SELECT chat_id, default_diff FROM settings WHERE is_active = 1 AND chat_id != 0").fetchall()
+    
     for row in rows:
         c_id = row["chat_id"]
         diff = row["default_diff"] or "medium"
         try:
-            existing = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (c_id,)).fetchone()
-            if not existing or time.time() > existing["expires"]:
-                asyncio.create_task(start_game(c_id, diff, c_id))
+            # Clear hanging stale puzzles from previous session
+            DB.execute("DELETE FROM games WHERE chat_id=?", (c_id,))
+            DB.commit()
+            
+            # Start fresh puzzle
+            await start_game(c_id, diff, c_id)
+            await asyncio.sleep(0.8)  # Flood protection delay
         except Exception as e:
-            print(f"Error resuming chat {c_id}: {e}")
+            print(f"Error auto-resuming game in {c_id}: {e}")
 
 # ============================================================
 # RUN BOT
