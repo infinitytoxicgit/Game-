@@ -13,7 +13,13 @@ from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatMemberStatus, ParseMode
 from pyrogram.errors import MessageNotModified, RPCError
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    Message,
+    ChatMemberUpdated
+)
 
 # ============================================================
 # CONFIG & HARDCODED CREDENTIALS
@@ -128,11 +134,16 @@ CREATE TABLE IF NOT EXISTS bot_config (
     value INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS group_bonus (
+CREATE TABLE IF NOT EXISTS group_adders (
+    chat_id INTEGER PRIMARY KEY,
     user_id INTEGER,
-    chat_id INTEGER,
-    claimed_at REAL,
-    PRIMARY KEY(user_id, chat_id)
+    added_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS group_bonus (
+    chat_id INTEGER PRIMARY KEY,
+    user_id INTEGER,
+    claimed_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS games (
@@ -402,6 +413,25 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
         await app.delete_messages(chat_id, message_id)
     except Exception:
         pass
+
+# ============================================================
+# BOT ADDED TO GROUP LISTENER
+# ============================================================
+
+@app.on_chat_member_updated()
+async def bot_added_handler(_, update: ChatMemberUpdated):
+    if update.new_chat_member and update.new_chat_member.user and update.new_chat_member.user.is_self:
+        # Bot added or updated in chat
+        if update.from_user and not update.from_user.is_bot:
+            chat_id = update.chat.id
+            user_id = update.from_user.id
+            ensure_user(update.from_user)
+            DB.execute("""
+                INSERT INTO group_adders (chat_id, user_id, added_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET user_id=excluded.user_id, added_at=excluded.added_at
+            """, (chat_id, user_id, time.time()))
+            DB.commit()
 
 # ============================================================
 # NORMAL GAME CORE
@@ -987,7 +1017,7 @@ async def sethint_global(_, message: Message):
         )
 
 # ============================================================
-# DAILY & GROUP BONUS CLAIM SYSTEM
+# DAILY & STRICT GROUP BONUS CLAIM SYSTEM
 # ============================================================
 
 @app.on_message(filters.command("setdaily"))
@@ -1062,30 +1092,59 @@ async def daily_cmd(_, message: Message):
 @app.on_message(filters.command("bonus"))
 async def bonus_cmd(_, message: Message):
     if not is_group(message):
-        return await message.reply_text("<blockquote>❌ <b><code>/bonus</code> command sirf group mein chal sakti hai jahan aapne bot ko admin banaya hai.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b><code>/bonus</code> command sirf group mein chal sakti hai jahan aapne bot ko add karke admin banaya hai.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     ensure_user(message.from_user)
     chat_id = message.chat.id
     user_id = message.from_user.id
 
+    # 1. Verify Bot Admin Rights & get who promoted the bot
+    promoted_by_user_id = None
     try:
         bot_member = await message.chat.get_member("me")
         if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
             return await message.reply_text("<blockquote>⚠️ <b>Bonus claim karne ke liye pehle bot ko is group mein Admin Rights dein!</b></blockquote>", parse_mode=ParseMode.HTML)
+        
+        # Pyrogram promoted_by_user extraction
+        if getattr(bot_member, "promoted_by", None):
+            promoted_by_user_id = bot_member.promoted_by.id
     except Exception:
-        return await message.reply_text("<blockquote>❌ <b>Bot ke permissions verify nahi ho sake. Kripya bot ko Admin banayein.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b>Bot ke admin permissions verify nahi ho sake. Kripya bot ko Admin banayein.</b></blockquote>", parse_mode=ParseMode.HTML)
 
-    claimed = DB.execute("SELECT * FROM group_bonus WHERE user_id=? AND chat_id=?", (user_id, chat_id)).fetchone()
+    # 2. Check if this group bonus has already been claimed
+    claimed = DB.execute("SELECT * FROM group_bonus WHERE chat_id=?", (chat_id,)).fetchone()
     if claimed:
-        return await message.reply_text("<blockquote>⚠️ <b>Aapne is group ke liye bonus pehle hi claim kar liya hai!</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>⚠️ <b>Is group ka bonus already claim kiya ja chuka hai!</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    # 3. Verify that the command sender is the actual person who added or promoted the bot
+    adder_row = DB.execute("SELECT user_id FROM group_adders WHERE chat_id=?", (chat_id,)).fetchone()
+    valid_claimant_id = adder_row["user_id"] if adder_row else promoted_by_user_id
+
+    # If tracker is missing, auto-bind to the admin who is currently calling /bonus
+    if not valid_claimant_id:
+        try:
+            member = await message.chat.get_member(user_id)
+            if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+                valid_claimant_id = user_id
+                DB.execute("""
+                    INSERT INTO group_adders (chat_id, user_id, added_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET user_id=excluded.user_id
+                """, (chat_id, user_id, time.time()))
+                DB.commit()
+        except Exception:
+            pass
+
+    if valid_claimant_id and user_id != valid_claimant_id and not is_owner(user_id):
+        return await message.reply_text("<blockquote>❌ <b>Yeh bonus sirf wahi user claim kar sakta hai jisne bot ko is group mein add ya admin banaya hai!</b></blockquote>", parse_mode=ParseMode.HTML)
 
     bonus_pts = get_global_config("bonus_points", 100)
     now = time.time()
 
     DB.execute("""
-        INSERT INTO group_bonus (user_id, chat_id, claimed_at)
+        INSERT INTO group_bonus (chat_id, user_id, claimed_at)
         VALUES (?, ?, ?)
-    """, (user_id, chat_id, now))
+    """, (chat_id, user_id, now))
 
     DB.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (bonus_pts, user_id))
     DB.execute("""
@@ -1098,7 +1157,7 @@ async def bonus_cmd(_, message: Message):
     await message.reply_text(
         f"<blockquote>🎉 <b>𝐆ʀᴏᴜᴘ 𝐁ᴏɴᴜs 𝐂ʟᴀɪᴍᴇᴅ!</b>\n\n"
         f"👤 {mention}\n"
-        f"⭐ <b>+{bonus_pts} Points</b> successfully aapke profile mein add ho gaye hain bot ko admin banane ke reward ke roop mein!</blockquote>",
+        f"⭐ <b>+{bonus_pts} Points</b> successfully aapke profile mein add ho gaye hain bot ko add karke admin banane ke reward ke roop mein!</blockquote>",
         parse_mode=ParseMode.HTML
     )
 
@@ -1238,23 +1297,8 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# WORD BANK MANAGEMENT (SINGLE / BULK ADDITION)
+# WORD BANK MANAGEMENT
 # ============================================================
-
-def handle_bulk_add_words(difficulty, raw_words_list):
-    added = []
-    skipped = []
-    for raw in raw_words_list:
-        w = clean_answer(raw)
-        if len(w) >= 3:
-            if w not in WORDS[difficulty]:
-                WORDS[difficulty].append(w)
-                DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, w))
-                added.append(w)
-            else:
-                skipped.append(w)
-    DB.commit()
-    return added, skipped
 
 @app.on_message(filters.command("addword"))
 async def addword_cmd(_, message: Message):
@@ -1456,7 +1500,7 @@ async def jumble_fight_cmd(_, message: Message):
     )
 
 # ============================================================
-# UNIFIED ANSWER HANDLER (BYPASSES ALL '/' COMMANDS)
+# UNIFIED ANSWER HANDLER
 # ============================================================
 
 @app.on_message(filters.text & ~filters.regex(r"^/"))
@@ -1522,12 +1566,14 @@ async def unified_answer_handler(_, message: Message):
         new_streak = u["streak"] + 1
         best = max(new_streak, u["best_streak"])
 
+        # Update Master Score
         DB.execute("""
             UPDATE users
             SET points=points+?, solved=solved+1, streak=?, best_streak=?
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
         
+        # Track Time-series Score History
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
             VALUES (?, ?, ?, ?)
