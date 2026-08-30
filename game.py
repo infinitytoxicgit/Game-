@@ -409,11 +409,11 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
 def normal_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💡 𝐇ɪɴᴛ (Primary)", callback_data="hint"),
-            InlineKeyboardButton("⏭️ 𝐒ᴋɪᴘ (Danger)", callback_data="skip")
+            InlineKeyboardButton("💡 𝐇ɪɴᴛ", callback_data="hint"),
+            InlineKeyboardButton("⏭️ 𝐒ᴋɪᴘ", callback_data="skip")
         ],
         [
-            InlineKeyboardButton("🆕 𝐍ᴇᴡ 𝐖ᴏʀᴅ (Success)", callback_data="newword")
+            InlineKeyboardButton("🆕 𝐍ᴇᴡ 𝐖ᴏʀᴅ", callback_data="newword")
         ]
     ])
 
@@ -452,8 +452,8 @@ async def start_game(chat_id, difficulty, message_or_chat):
         f"🎯 <b>𝐃ɪғғɪᴄᴜʟᴛʏ:</b> <code>{difficulty.title()}</code>\n"
         f"⏱️ <b>𝐓ɪᴍᴇ:</b> <code>{timer_val // 60}m {timer_val % 60}s</code>\n"
         f"⭐ <b>𝐑ᴇᴡᴀʀᴅ:</b> <code>+{reward_pts} Points</code>\n"
-        f"💡 <b>𝐇ɪɴᴛs:</b> <code>{hint_limit}/word</code>\n\n"
-        f"🔀 <i>𝐔ɴsᴄʀᴀᴍʙʟᴇ ᴛʜᴇ ʟᴇᴛᴛᴇʀs & ᴛʏᴘᴇ ɪɴ ᴄʜᴀᴛ!</i></blockquote>"
+        f"💡 <b>𝐇ɪɴᴛs:</b> <code>{hint_limit}/word</code></blockquote>\n\n"
+        f"<blockquote>🔀 <i>𝐔ɴsᴄʀᴀᴍʙʟᴇ ᴛʜᴇ ʟᴇᴛᴛᴇʀs & ᴛʏᴘᴇ ɪɴ ᴄʜᴀᴛ!</i></blockquote>"
     )
 
     try:
@@ -519,7 +519,7 @@ FIGHT_LOBBY = {}
 def fight_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💡 𝐇ɪɴᴛ (Primary)", callback_data="fight_hint")
+            InlineKeyboardButton("💡 𝐇ɪɴᴛ", callback_data="fight_hint")
         ]
     ])
 
@@ -651,7 +651,7 @@ async def finish_fight(chat_id):
     await asyncio.sleep(3)
     s = get_settings(chat_id)
     if s["is_active"]:
-        await app.send_message(chat_id, "🔄 <i>𝐑ᴇsᴜᴍɪɴɢ ɴᴏʀᴍᴀʟ 𝐉ᴜᴍʙʟᴇ 𝐆ᴀᴍᴇ...</i>", parse_mode=ParseMode.HTML)
+        await app.send_message(chat_id, "<blockquote>🔄 <i>𝐑ᴇsᴜᴍɪɴɢ ɴᴏʀᴍᴀʟ 𝐉ᴜᴍʙʟᴇ 𝐆ᴀᴍᴇ...</i></blockquote>", parse_mode=ParseMode.HTML)
         asyncio.create_task(start_game(chat_id, s["default_diff"], chat_id))
 
 # ============================================================
@@ -662,30 +662,30 @@ async def finish_fight(chat_id):
 async def start_cmd(_, message: Message):
     ensure_user(message.from_user)
     text = (
-        "<blockquote>🧩 <b>𝐖ᴇʟᴄᴏᴍᴇ 𝐓ᴏ 𝐀ᴅᴠᴀɴᴄᴇᴅ 𝐉ᴜᴍʙʟᴇ 𝐁ᴏᴛ!</b>\n\n"
-        "🎮 <b>𝐆ᴀᴍᴇ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
-        "• /jumble — <b>𝐒ᴛᴀʀᴛ 𝐀ᴜᴛᴏ-ʟᴏᴏᴘ 𝐉ᴜᴍʙʟᴇ 𝐆ᴀᴍᴇ</b>\n"
-        "• /jumblefight @user — <b>1v1 𝐁ᴀᴛᴛʟᴇ 𝐌ᴏᴅᴇ (ᴡɪᴛʜ 𝐀ᴄᴄᴇᴘᴛ 𝐆ᴀᴛᴇ)</b>\n"
-        "• /settings — <b>𝐀ᴅᴍɪɴ 𝐏ᴀɴᴇʟ (𝐒ᴛᴀʀᴛ/𝐒ᴛᴏᴘ, 𝐌ᴏᴅᴇ, 𝐀ᴜᴛᴏ-ᴅᴇʟᴇᴛᴇ)</b>\n\n"
-        "🎁 <b>𝐅ʀᴇᴇ 𝐏ᴏɪɴᴛs & 𝐑ᴇᴡᴀʀᴅs:</b>\n"
-        "• /daily — <b>𝐂ʟᴀɪᴍ 𝐃ᴀɪʟʏ 𝐁ᴏɴᴜs 𝐏ᴏɪɴᴛs ɪɴ 𝐃ᴍ (ᴇᴠᴇʀʏ 24ʜ)</b>\n"
-        "• /bonus — <b>𝐂ʟᴀɪᴍ 𝐆ʀᴏᴜᴘ 𝐀ᴅᴅɪᴛɪᴏɴ 𝐁ᴏɴᴜs (ᴡʜᴇɴ 𝐁ᴏᴛ ɪs 𝐀ᴅᴅᴇᴅ ᴀs 𝐀ᴅᴍɪɴ)</b>\n\n"
-        "🛡️ <b>𝐏ʀɪᴠᴀᴄʏ 𝐒ᴇᴛᴛɪɴɢs:</b>\n"
-        "• /private — <b>𝐇ɪᴅᴇ 𝐈𝐃/𝐓ᴀɢ ᴏɴ 𝐋ᴇᴀᴅᴇʀʙᴏᴀʀᴅ (𝐍ᴀᴍᴇ ᴏɴʟʏ)</b>\n"
-        "• /public — <b>𝐒ʜᴏᴡ 𝐓ᴀɢ & 𝐈𝐃 ᴏɴ 𝐋ᴇᴀᴅᴇʀʙᴏᴀʀᴅ</b>\n\n"
-        "📊 <b>𝐒ᴛᴀᴛs & 𝐑ᴀɴᴋɪɴɢs:</b>\n"
-        "• /stats — <b>𝐘ᴏᴜʀ 𝐏ᴇʀғᴏʀᴍᴀɴᴄᴇ</b>\n"
-        "• /leaderboard — <b>𝐃ᴀɪʟʏ, 𝐖ᴇᴇᴋʟʏ, 𝐌ᴏɴᴛʜʟʏ & 𝐆ʟᴏʙᴀʟ 𝐑ᴀɴᴋs</b>\n"
-        "• /help — <b>𝐅ᴜʟʟ 𝐁ᴏᴛ 𝐆ᴜɪᴅᴇ</b></blockquote>"
+        "<blockquote>🧩 <b>𝐖ᴇʟᴄᴏᴍᴇ 𝐓ᴏ 𝐀ᴅᴠᴀɴᴄᴇᴅ 𝐉ᴜᴍʙʟᴇ 𝐁ᴏᴛ!</b></blockquote>\n\n"
+        "<blockquote>🎮 <b>𝐆ᴀᴍᴇ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
+        "• <code>/jumble</code> — 𝐒ᴛᴀʀᴛ 𝐀ᴜᴛᴏ-ʟᴏᴏᴘ 𝐉ᴜᴍʙʟᴇ 𝐆ᴀᴍᴇ\n"
+        "• <code>/jumblefight @user</code> — 1v1 𝐁ᴀᴛᴛʟᴇ 𝐌ᴏᴅᴇ (ᴡɪᴛʜ 𝐀ᴄᴄᴇᴘᴛ 𝐆ᴀᴛᴇ)\n"
+        "• <code>/settings</code> — 𝐀ᴅᴍɪɴ 𝐏ᴀɴᴇʟ (𝐒ᴛᴀʀᴛ/𝐒ᴛᴏᴘ, 𝐌ᴏᴅᴇ, 𝐀ᴜᴛᴏ-ᴅᴇʟᴇᴛᴇ)</blockquote>\n\n"
+        "<blockquote>🎁 <b>𝐅ʀᴇᴇ 𝐏ᴏɪɴᴛs & 𝐑ᴇᴡᴀʀᴅs:</b>\n"
+        "• <code>/daily</code> — 𝐂ʟᴀɪᴍ 𝐃ᴀɪʟʏ 𝐁ᴏɴᴜs 𝐏ᴏɪɴᴛs ɪɴ 𝐃ᴍ (ᴇᴠᴇʀʏ 24ʜ)\n"
+        "• <code>/bonus</code> — 𝐂ʟᴀɪᴍ 𝐆ʀᴏᴜᴘ 𝐀ᴅᴅɪᴛɪᴏɴ 𝐁ᴏɴᴜs (ᴡʜᴇɴ 𝐁ᴏᴛ ɪs 𝐀ᴅᴅᴇᴅ ᴀs 𝐀ᴅᴍɪɴ)</blockquote>\n\n"
+        "<blockquote>🛡️ <b>𝐏ʀɪᴠᴀᴄʏ 𝐒ᴇᴛᴛɪɴɢs:</b>\n"
+        "• <code>/private</code> — 𝐇ɪᴅᴇ 𝐈𝐃/𝐓ᴀɢ ᴏɴ 𝐋ᴇᴀᴅᴇʀʙᴏᴀʀᴅ (𝐍ᴀᴍᴇ ᴏɴʟʏ)\n"
+        "• <code>/public</code> — 𝐒ʜᴏᴡ 𝐓ᴀɢ & 𝐈𝐃 ᴏɴ 𝐋ᴇᴀᴅᴇʀʙᴏᴀʀᴅ</blockquote>\n\n"
+        "<blockquote>📊 <b>𝐒ᴛᴀᴛs & 𝐑ᴀɴᴋɪɴɢs:</b>\n"
+        "• <code>/stats</code> — 𝐘ᴏᴜʀ 𝐏ᴇʀғᴏʀᴍᴀɴᴄᴇ\n"
+        "• <code>/leaderboard</code> — 𝐃ᴀɪʟʏ, 𝐖ᴇᴇᴋʟʏ, 𝐌ᴏɴᴛʜʟʏ & 𝐆ʟᴏʙᴀʟ 𝐑ᴀɴᴋs\n"
+        "• <code>/help</code> — 𝐅ᴜʟʟ 𝐁ᴏᴛ 𝐆ᴜɪᴅᴇ</blockquote>"
     )
 
     dm_markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💬 𝐒ᴜᴘᴘᴏʀᴛ (Primary)", url=SUPPORT_GC),
-            InlineKeyboardButton("𝐀ᴅᴅ 𝐌ᴇ ➕ (Success)", url=ADD_ME_URL)
+            InlineKeyboardButton("💬 𝐒ᴜᴘᴘᴏʀᴛ", url=SUPPORT_GC),
+            InlineKeyboardButton("➕ 𝐀ᴅᴅ 𝐌ᴇ", url=ADD_ME_URL)
         ],
         [
-            InlineKeyboardButton("˹ 𓆩ℛᴏ֟፝ᴏʜɪ ꭙ 𝐌ᴜ֟፝sɪᴄ𓆪˼ ♪ (Danger)", url=MUSIC_BOT_URL)
+            InlineKeyboardButton("˹ 𓆩ℛᴏ֟፝ᴏʜɪ ꭙ 𝐌ᴜ֟፝sɪᴄ𓆪˼ ♪", url=MUSIC_BOT_URL)
         ]
     ])
 
@@ -710,11 +710,11 @@ async def help_cmd(_, message: Message):
         "• <code>/leaderboard</code> — 𝐓ᴏᴘ ᴘʟᴀʏᴇʀs ʀᴀɴᴋɪɴɢ\n"
         "• <code>/stats</code> — 𝐏ᴇʀsᴏɴᴀʟ sᴄᴏʀᴇ ᴄᴀʀᴅ\n"
         "• <code>/private</code> — 𝐇ɪᴅᴇ ᴛᴀɢ & 𝐈𝐃 ғʀᴏᴍ ʟᴇᴀᴅᴇʀʙᴏᴀʀᴅ\n"
-        "• <code>/public</code> — 𝐒ʜᴏᴡ ᴛᴀɢ & 𝐈𝐃 ᴏɴ ʟᴇᴀᴅᴇʀʙᴏᴀʀᴅ\n\n"
+        "• <code>/public</code> — 𝐒ʜᴏᴡ ᴛᴀɢ & 𝐈𝐃 ᴏɴ ʟᴇᴀᴅᴇʀʙᴏᴀʀᴅ</blockquote>"
     )
     if is_user_auth:
         text += (
-            "🔐 <b>𝐀ᴜᴛʜ / 𝐖ᴏʀᴅ 𝐁ᴀɴᴋ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
+            "\n\n<blockquote>🔐 <b>𝐀ᴜᴛʜ / 𝐖ᴏʀᴅ 𝐁ᴀɴᴋ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
             "• <code>/word</code> — 𝐕ɪᴇᴡ ᴄᴀᴛᴇɢᴏʀɪᴢᴇᴅ ᴡᴏʀᴅ ʙᴀɴᴋ\n"
             "• <code>/word easy cat dog bird tree</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ ᴡᴏʀᴅs\n"
             "• <code>/addword easy apple banana</code> — 𝐀ᴅᴅ sɪɴɢʟᴇ/ᴍᴜʟᴛɪᴘʟᴇ ᴡᴏʀᴅs\n"
@@ -723,16 +723,15 @@ async def help_cmd(_, message: Message):
             "• <code>/sethint [easy|med|hard] [hints]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ʜɪɴᴛs\n"
             "• <code>/setdaily [points]</code> — 𝐒ᴇᴛ ᴅᴀɪʟʏ ᴄʟᴀɪᴍ ʀᴇᴡᴀʀᴅ\n"
             "• <code>/setbonus [points]</code> — 𝐒ᴇᴛ ɢʀᴏᴜᴘ ʙᴏɴᴜs ʀᴇᴡᴀʀᴅ\n"
-            "• <code>/update</code> — 𝐆ɪᴛ sᴛᴀsʜ, ᴘᴜʟʟ & 𝐀ᴜᴛᴏ-ʀᴇsᴜᴍᴇ\n"
+            "• <code>/update</code> — 𝐆ɪᴛ sᴛᴀsʜ, ᴘᴜʟʟ & 𝐀ᴜᴛᴏ-ʀᴇsᴜᴍᴇ</blockquote>"
         )
     if is_owner(message.from_user.id):
         text += (
-            "\n👑 <b>𝐎ᴡɴᴇʀ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
+            "\n\n<blockquote>👑 <b>𝐎ᴡɴᴇʀ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
             "• <code>/auth @user</code> — 𝐆ʀᴀɴᴛ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
             "• <code>/unauth @user</code> — 𝐑ᴇᴠᴏᴋᴇ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
-            "• <code>/authlist</code> — 𝐋ɪsᴛ ᴏғ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴜsᴇʀs\n"
+            "• <code>/authlist</code> — 𝐋ɪsᴛ ᴏғ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴜsᴇʀs</blockquote>"
         )
-    text += "</blockquote>"
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ============================================================
@@ -1073,23 +1072,8 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# WORD BANK MANAGEMENT (SINGLE / BULK ADDITION)
+# WORD BANK MANAGEMENT
 # ============================================================
-
-def handle_bulk_add_words(difficulty, raw_words_list):
-    added = []
-    skipped = []
-    for raw in raw_words_list:
-        w = clean_answer(raw)
-        if len(w) >= 3:
-            if w not in WORDS[difficulty]:
-                WORDS[difficulty].append(w)
-                DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, w))
-                added.append(w)
-            else:
-                skipped.append(w)
-    DB.commit()
-    return added, skipped
 
 @app.on_message(filters.command("addword"))
 async def addword_cmd(_, message: Message):
@@ -1187,378 +1171,6 @@ async def words_menu_cmd(_, message: Message):
         parse_mode=ParseMode.HTML
     )
     asyncio.create_task(delete_after(message, 3))
-
-# ============================================================
-# SETTINGS PANEL
-# ============================================================
-
-@app.on_message(filters.command("settings"))
-async def settings_cmd(_, message: Message):
-    if not await is_admin_or_owner(message.chat, message.from_user.id):
-        return await message.reply_text("<blockquote>❌ <b>Only group admins can configure settings.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    s = get_settings(message.chat.id)
-    cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
-    status_btn = InlineKeyboardButton("⏹️ 𝐒ᴛᴏᴘ 𝐆ᴀᴍᴇ (Danger)", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ 𝐒ᴛᴀʀᴛ 𝐆ᴀᴍᴇ (Success)", callback_data="set_start_game")
-    del_btn = InlineKeyboardButton("🗑️ 𝐀ᴜᴛᴏ-𝐃ᴇʟ: 𝐎𝐍 (Primary)", callback_data="set_toggle_autodel") if s["auto_delete"] else InlineKeyboardButton("🗑️ 𝐀ᴜᴛᴏ-𝐃ᴇʟ: 𝐎𝐅𝐅", callback_data="set_toggle_autodel")
-
-    p_easy = get_global_config("points_easy", 10)
-    p_med = get_global_config("points_medium", 20)
-    p_hard = get_global_config("points_hard", 30)
-
-    h_easy = get_global_config("hints_easy", 3)
-    h_med = get_global_config("hints_medium", 3)
-    h_hard = get_global_config("hints_hard", 3)
-
-    kb = InlineKeyboardMarkup([
-        [
-            status_btn,
-            InlineKeyboardButton(f"🎯 𝐌ᴏᴅᴇ: {str(cur_diff).upper()}", callback_data="set_menu_mode")
-        ],
-        [
-            InlineKeyboardButton("⏱️ 𝐓ɪᴍᴇʀs", callback_data="set_menu_timers"),
-            del_btn
-        ],
-        [
-            InlineKeyboardButton("❌ 𝐂ʟᴏsᴇ", callback_data="close_panel")
-        ]
-    ])
-    await message.reply_text(
-        f"<blockquote>⚙️ <b>𝐉ᴜᴍʙʟᴇ 𝐆ʀᴏᴜᴘ 𝐒ᴇᴛᴛɪɴɢs</b>\n\n"
-        f"🟢 <b>𝐆ᴀᴍᴇ 𝐒ᴛᴀᴛᴜs:</b> <code>{'Running' if s['is_active'] else 'Stopped'}</code>\n"
-        f"🗑️ <b>𝐀ᴜᴛᴏ 𝐃ᴇʟᴇᴛᴇ 𝐎ʟᴅ:</b> <code>{'Enabled' if s['auto_delete'] else 'Disabled'}</code>\n"
-        f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
-        f"⏱️ <b>𝐓ɪᴍᴇʀs:</b> Easy: <code>{s['easy']}s</code> | Med: <code>{s['medium']}s</code> | Hard: <code>{s['hard']}s</code>\n\n"
-        f"🌍 <b>𝐆ʟᴏʙᴀʟ 𝐑ᴇᴡᴀʀᴅs:</b> Easy: <code>{p_easy}pts</code> | Med: <code>{p_med}pts</code> | Hard: <code>{p_hard}pts</code>\n"
-        f"💡 <b>𝐆ʟᴏʙᴀʟ 𝐇ɪɴᴛs:</b> Easy: <code>{h_easy}</code> | Med: <code>{h_med}</code> | Hard: <code>{h_hard}</code></blockquote>",
-        reply_markup=kb,
-        parse_mode=ParseMode.HTML
-    )
-
-@app.on_message(filters.command("jumble"))
-async def jumble_cmd(_, message: Message):
-    ensure_user(message.from_user)
-    if message.chat.id in JUMBLE_FIGHT:
-        return await message.reply_text("<blockquote>⚔️ <b>Jumble Fight chal rahi hai, match khatam hone tak wait karein.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
-    DB.commit()
-
-    s = get_settings(message.chat.id)
-    default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
-    difficulty = message.command[1].lower() if len(message.command) > 1 else default_d
-    
-    if difficulty not in WORDS:
-        difficulty = "medium"
-
-    await start_game(message.chat.id, difficulty, message)
-
-@app.on_message(filters.command(["jumblefight", "fight", "rapido"]))
-async def jumble_fight_cmd(_, message: Message):
-    if not is_group(message):
-        return await message.reply_text("<blockquote>❌ <b>Jumble Fight sirf groups mein chal sakta hai.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    target_user = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_user = message.reply_to_message.from_user
-    elif len(message.command) >= 2:
-        arg = message.command[1]
-        try:
-            if arg.isdigit():
-                target_user = await app.get_users(int(arg))
-            else:
-                target_user = await app.get_users(arg)
-        except Exception:
-            return await message.reply_text("❌ User nahi mila.")
-    elif message.entities:
-        for entity in message.entities:
-            if entity.type.name == "TEXT_MENTION" and entity.user:
-                target_user = entity.user
-                break
-
-    if not target_user:
-        return await message.reply_text("Usage:\n• <code>/jumblefight @username</code>\n• <code>/jumblefight UserID</code>\n• Reply to a user with <code>/jumblefight</code>", parse_mode=ParseMode.HTML)
-
-    if target_user.id == message.from_user.id:
-        return await message.reply_text("<blockquote>❌ <b>Khud ke sath fight nahi kar sakte.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    if target_user.is_bot:
-        return await message.reply_text("<blockquote>❌ <b>Bots ke sath match nahi ho sakta.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    ensure_user(message.from_user)
-    ensure_user(target_user)
-
-    key = message.chat.id
-    if key in JUMBLE_FIGHT:
-        return await message.reply_text("<blockquote>⚔️ <b>Is group mein already Jumble Fight chal rahi hai.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    m1 = get_mention(message.from_user)
-    m2 = get_mention(target_user)
-
-    FIGHT_LOBBY[key] = {
-        "p1": message.from_user.id,
-        "p2": target_user.id,
-        "p1_name": message.from_user.first_name,
-        "p2_name": target_user.first_name,
-        "m1": m1,
-        "m2": m2,
-        "difficulty": "medium",
-        "timer": 60
-    }
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🟢 𝐄ᴀsʏ", callback_data="f_diff_easy"),
-            InlineKeyboardButton("🟡 𝐌ᴇᴅɪᴜᴍ", callback_data="f_diff_medium"),
-            InlineKeyboardButton("🔴 𝐇ᴀʀᴅ", callback_data="f_diff_hard")
-        ],
-        [
-            InlineKeyboardButton("⏱️ 30s", callback_data="f_time_30"),
-            InlineKeyboardButton("⏱️ 45s", callback_data="f_time_45"),
-            InlineKeyboardButton("⏱️ 60s", callback_data="f_time_60")
-        ],
-        [
-            InlineKeyboardButton("✅ 𝐀ᴄᴄᴇᴘᴛ 𝐂ʜᴀʟʟᴇɴɢᴇ (Success)", callback_data="f_accept"),
-            InlineKeyboardButton("❌ 𝐃ᴇᴄʟɪɴᴇ (Danger)", callback_data="f_decline")
-        ]
-    ])
-
-    await message.reply_text(
-        f"<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>\n\n"
-        f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ:</b> {m1} (<code>{message.from_user.id}</code>)\n"
-        f"🎯 <b>𝐓ᴀʀɢᴇᴛ:</b> {m2} (<code>{target_user.id}</code>)\n\n"
-        f"⚙️ <b>𝐒ᴇᴛᴛɪɴɢs:</b> Mode: <code>Medium</code> | Timer: <code>60s</code>\n\n"
-        f"👉 {m2}, match shuru karne ke liye <b>Accept Challenge</b> par click karo!</blockquote>",
-        reply_markup=kb,
-        parse_mode=ParseMode.HTML
-    )
-
-@app.on_message(filters.command("stats"))
-async def stats_cmd(_, message: Message):
-    ensure_user(message.from_user)
-    u = get_user(message.from_user.id)
-    total = u["fight_wins"] + u["fight_losses"]
-    winrate = ((u["fight_wins"] / total) * 100) if total else 0
-    mention = get_mention(message.from_user)
-    priv_status = "🔒 Private" if u["is_private"] else "🌐 Public"
-
-    await message.reply_text(
-        f"<blockquote>👤 {mention} (<code>{message.from_user.id}</code>)\n\n"
-        f"⭐ <b>𝐏ᴏɪɴᴛs:</b> <code>{u['points']}</code>\n"
-        f"🧩 <b>𝐒ᴏʟᴠᴇᴅ:</b> <code>{u['solved']}</code>\n"
-        f"🔥 <b>𝐒ᴛʀᴇᴀᴋ:</b> <code>{u['streak']}</code> (Best: {u['best_streak']})\n"
-        f"🛡️ <b>𝐏ʀɪᴠᴀᴄʏ:</b> <code>{priv_status}</code>\n\n"
-        f"⚔️ <b>𝐉ᴜᴍʙʟᴇ 𝐅ɪɢʜᴛ:</b> <code>{u['fight_wins']}W - {u['fight_losses']}L</code>\n"
-        f"📈 <b>𝐖ɪɴ 𝐑ᴀᴛᴇ:</b> <code>{winrate:.1f}%</code></blockquote>",
-        parse_mode=ParseMode.HTML
-    )
-
-# ============================================================
-# DYNAMIC LEADERBOARD SYSTEM
-# ============================================================
-
-def format_lb_entry(user_id, name, username, is_private):
-    clean_name = (name or "Player").replace("<", "&lt;").replace(">", "&gt;")
-    if is_private:
-        return f"<b>{clean_name}</b>"
-    
-    if username:
-        return f"<a href='https://t.me/{username}'>{clean_name}</a> (<code>{user_id}</code>)"
-    return f"<a href='tg://openmessage?user_id={user_id}'>{clean_name}</a> (<code>{user_id}</code>)"
-
-def build_leaderboard_text_and_kb(scope_type, chat_id):
-    now = time.time()
-    medals = ["🥇", "🥈", "🥉"]
-    
-    if scope_type == "daily":
-        since = now - 86400
-        title = "📅 <b>𝐃𝐀𝐈𝐋𝐘 𝐆𝐑𝐎𝐔𝐏 𝐋𝐄𝐀𝐃𝐄𝐑𝐁𝐎𝐀𝐑𝐃 (24h)</b>"
-        rows = DB.execute("""
-            SELECT h.user_id, u.name, u.username, u.is_private, SUM(h.points) as total_pts
-            FROM score_history h
-            JOIN users u ON h.user_id = u.user_id
-            WHERE h.chat_id = ? AND h.timestamp >= ?
-            GROUP BY h.user_id
-            ORDER BY total_pts DESC
-            LIMIT 10
-        """, (chat_id, since)).fetchall()
-        
-    elif scope_type == "weekly":
-        since = now - (86400 * 7)
-        title = "🗓️ <b>𝐖𝐄𝐄𝐊𝐋𝐘 𝐆𝐑𝐎𝐔𝐏 𝐋𝐄𝐀𝐃𝐄𝐑𝐁𝐎𝐀𝐑𝐃 (7 Days)</b>"
-        rows = DB.execute("""
-            SELECT h.user_id, u.name, u.username, u.is_private, SUM(h.points) as total_pts
-            FROM score_history h
-            JOIN users u ON h.user_id = u.user_id
-            WHERE h.chat_id = ? AND h.timestamp >= ?
-            GROUP BY h.user_id
-            ORDER BY total_pts DESC
-            LIMIT 10
-        """, (chat_id, since)).fetchall()
-
-    elif scope_type == "monthly":
-        since = now - (86400 * 30)
-        title = "📆 <b>𝐌𝐎𝐍𝐓𝐇𝐋𝐘 𝐆𝐋𝐎𝐁𝐀𝐋 𝐋𝐄𝐀𝐃𝐄𝐑𝐁𝐎𝐀𝐑𝐃 (30 Days)</b>"
-        rows = DB.execute("""
-            SELECT h.user_id, u.name, u.username, u.is_private, SUM(h.points) as total_pts
-            FROM score_history h
-            JOIN users u ON h.user_id = u.user_id
-            WHERE h.timestamp >= ?
-            GROUP BY h.user_id
-            ORDER BY total_pts DESC
-            LIMIT 10
-        """, (since,)).fetchall()
-
-    else:
-        title = "🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐀𝐋𝐋-𝐓𝐈𝐌𝐄 𝐋𝐄𝐀𝐃𝐄𝐑𝐁𝐎𝐀𝐑𝐃</b>"
-        rows = DB.execute("""
-            SELECT user_id, name, username, is_private, points as total_pts
-            FROM users
-            ORDER BY points DESC
-            LIMIT 10
-        """).fetchall()
-
-    text = f"<blockquote>{title}\n\n"
-    if not rows:
-        text += "<i>Abhi tak koi score record nahi hua hai.</i>"
-    else:
-        for i, u in enumerate(rows, 1):
-            medal = medals[i - 1] if i <= 3 else f"<code>{i}.</code>"
-            user_entry = format_lb_entry(u['user_id'], u['name'], u['username'], u['is_private'])
-            text += f"{medal} {user_entry} — ⭐ <b>{u['total_pts']} pts</b>\n"
-    text += "</blockquote>"
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(f"{'✅ ' if scope_type=='daily' else ''}📅 𝐃ᴀɪʟʏ (GC)", callback_data=f"lb_daily_{chat_id}"),
-            InlineKeyboardButton(f"{'✅ ' if scope_type=='weekly' else ''}🗓️ 𝐖ᴇᴇᴋʟʏ (GC)", callback_data=f"lb_weekly_{chat_id}")
-        ],
-        [
-            InlineKeyboardButton(f"{'✅ ' if scope_type=='monthly' else ''}📆 𝐌ᴏɴᴛʜʟʏ (Global)", callback_data=f"lb_monthly_{chat_id}"),
-            InlineKeyboardButton(f"{'✅ ' if scope_type=='global' else ''}🌍 𝐆ʟᴏʙᴀʟ", callback_data=f"lb_global_{chat_id}")
-        ],
-        [
-            InlineKeyboardButton("❌ 𝐂ʟᴏsᴇ", callback_data="close_panel")
-        ]
-    ])
-
-    return text, kb
-
-@app.on_message(filters.command(["leaderboard", "top", "rank", "lb"]))
-async def leaderboard_cmd(_, message: Message):
-    chat_id = message.chat.id
-    scope = "daily" if is_group(message) else "global"
-    text, kb = build_leaderboard_text_and_kb(scope, chat_id)
-    await message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-# ============================================================
-# UNIFIED ANSWER HANDLER
-# ============================================================
-
-@app.on_message(
-    filters.text &
-    ~filters.command([
-        "start", "help", "jumble", "stats", "leaderboard", "top", "rank", "lb",
-        "jumblefight", "fight", "rapido", "settings", "setpoints", "sethint", "setdaily", "setbonus",
-        "daily", "bonus", "private", "public",
-        "addword", "delword", "word", "words", "auth", "unauth", "authlist", "update", "gitpull"
-    ])
-)
-async def unified_answer_handler(_, message: Message):
-    if not message.from_user:
-        return
-
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    cleaned_input = clean_answer(message.text)
-
-    # 1. Active Jumble Fight Check
-    if chat_id in JUMBLE_FIGHT:
-        async with LOCK:
-            game = JUMBLE_FIGHT.get(chat_id)
-            if not game or user_id not in game["players"]:
-                return
-
-            if time.time() <= game["expires"] and cleaned_input == clean_answer(game["word"]):
-                curr = asyncio.current_task()
-                if game.get("task") and game["task"] is not curr and not game["task"].done():
-                    try:
-                        game["task"].cancel()
-                    except Exception:
-                        pass
-
-                game["scores"][user_id] += 1
-                
-                s = get_settings(chat_id)
-                if s["auto_delete"] and game.get("msg_id"):
-                    await safe_delete_and_unpin(chat_id, game["msg_id"])
-
-                u_mention = get_mention(message.from_user)
-                r_msg = await message.reply_text(
-                    f"<blockquote>⚡ {u_mention} (<code>{user_id}</code>) <b>𝐖𝐎𝐍 𝐑𝐎𝐔𝐍𝐃 {game['round']}!</b>\n"
-                    f"🏆 <b>𝐑ᴏᴜɴᴅ 𝐒ᴄᴏʀᴇ:</b> <code>{game['scores'][user_id]}</code></blockquote>",
-                    parse_mode=ParseMode.HTML
-                )
-                if s["auto_delete"]:
-                    asyncio.create_task(delete_after(r_msg, 4))
-                    
-                await asyncio.sleep(2.5)
-                asyncio.create_task(fight_next(chat_id))
-                return
-        return
-
-    # 2. Normal Game Check
-    game = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (chat_id,)).fetchone()
-    if not game or time.time() > game["expires"]:
-        return
-
-    if cleaned_input == clean_answer(game["word"]):
-        updated = DB.execute("UPDATE games SET solved=1 WHERE chat_id=? AND solved=0", (chat_id,))
-        if updated.rowcount != 1:
-            return
-        DB.commit()
-
-        ensure_user(message.from_user)
-        u = get_user(user_id)
-        settings = get_settings(chat_id)
-        pts_reward = get_global_config(f"points_{game['difficulty']}", 10)
-
-        new_streak = u["streak"] + 1
-        best = max(new_streak, u["best_streak"])
-
-        DB.execute("""
-            UPDATE users
-            SET points=points+?, solved=solved+1, streak=?, best_streak=?
-            WHERE user_id=?
-        """, (pts_reward, new_streak, best, user_id))
-        
-        DB.execute("""
-            INSERT INTO score_history (user_id, chat_id, points, timestamp)
-            VALUES (?, ?, ?, ?)
-        """, (user_id, chat_id, pts_reward, time.time()))
-        DB.commit()
-
-        if settings["auto_delete"] and game["message_id"]:
-            await safe_delete_and_unpin(chat_id, game["message_id"])
-
-        u_mention = get_mention(message.from_user)
-        c_msg = await message.reply_text(
-            f"<blockquote>🎉 <b>𝐂𝐎𝐑𝐑𝐄𝐂𝐓!</b>\n\n"
-            f"👤 {u_mention} (<code>{user_id}</code>)\n"
-            f"✅ <b>𝐀ɴsᴡᴇʀ:</b> <code>{game['word'].upper()}</code>\n"
-            f"⭐ <b>+{pts_reward} points</b>\n"
-            f"🔥 <b>𝐂ᴜʀʀᴇɴᴛ 𝐒ᴛʀᴇᴀᴋ:</b> <code>{new_streak}</code>\n\n"
-            f"🔄 <i>𝐍ᴇxᴛ ᴘᴜᴢᴢʟᴇ ᴄᴏᴍɪɴɢ ɪɴ 3 sᴇᴄᴏɴᴅs...</i></blockquote>",
-            parse_mode=ParseMode.HTML
-        )
-
-        if settings["auto_delete"]:
-            asyncio.create_task(delete_after(c_msg, 4))
-
-        await asyncio.sleep(3)
-        s = get_settings(chat_id)
-        if chat_id not in JUMBLE_FIGHT and s["is_active"]:
-            asyncio.create_task(start_game(chat_id, game["difficulty"], chat_id))
 
 # ============================================================
 # CALLBACK QUERIES
@@ -1804,8 +1416,8 @@ async def callback_router(_, query: CallbackQuery):
                 InlineKeyboardButton(f"{'✅ ' if lobby['timer']==60 else ''}⏱️ 60s", callback_data="f_time_60")
             ],
             [
-                InlineKeyboardButton("✅ 𝐀ᴄᴄᴇᴘᴛ 𝐂ʜᴀʟʟᴇɴɢᴇ (Success)", callback_data="f_accept"),
-                InlineKeyboardButton("❌ 𝐃ᴇᴄʟɪɴᴇ (Danger)", callback_data="f_decline")
+                InlineKeyboardButton("✅ 𝐀ᴄᴄᴇᴘᴛ 𝐂ʜᴀʟʟᴇɴɢᴇ", callback_data="f_accept"),
+                InlineKeyboardButton("❌ 𝐃ᴇᴄʟɪɴᴇ", callback_data="f_decline")
             ]
         ])
         try:
@@ -1945,8 +1557,8 @@ async def callback_router(_, query: CallbackQuery):
 async def show_settings_panel(message_obj, chat_id):
     s = get_settings(chat_id)
     cur_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
-    status_btn = InlineKeyboardButton("⏹️ 𝐒ᴛᴏᴘ 𝐆ᴀᴍᴇ (Danger)", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ 𝐒ᴛᴀʀᴛ 𝐆ᴀᴍᴇ (Success)", callback_data="set_start_game")
-    del_btn = InlineKeyboardButton("🗑️ 𝐀ᴜᴛᴏ-𝐃ᴇʟ: 𝐎𝐍 (Primary)", callback_data="set_toggle_autodel") if s["auto_delete"] else InlineKeyboardButton("🗑️ 𝐀ᴜᴛᴏ-𝐃ᴇʟ: 𝐎𝐅𝐅", callback_data="set_toggle_autodel")
+    status_btn = InlineKeyboardButton("⏹️ 𝐒ᴛᴏᴘ 𝐆ᴀᴍᴇ", callback_data="set_stop_game") if s["is_active"] else InlineKeyboardButton("▶️ 𝐒ᴛᴀʀᴛ 𝐆ᴀᴍᴇ", callback_data="set_start_game")
+    del_btn = InlineKeyboardButton("🗑️ 𝐀ᴜᴛᴏ-𝐃ᴇʟ: 𝐎𝐍", callback_data="set_toggle_autodel") if s["auto_delete"] else InlineKeyboardButton("🗑️ 𝐀ᴜᴛᴏ-𝐃ᴇʟ: 𝐎𝐅𝐅", callback_data="set_toggle_autodel")
 
     p_easy = get_global_config("points_easy", 10)
     p_med = get_global_config("points_medium", 20)
@@ -2006,7 +1618,7 @@ async def resume_all_active_games():
 
 async def main():
     await app.start()
-    print("🚀 Advanced Jumble & Jumble Fight Bot Started Successfully!")
+    print("🚀 Jumble Fight & Jumble Bot Started Successfully (with Clean Blockquote Layout)!")
     asyncio.create_task(resume_all_active_games())
     await asyncio.Event().wait()
 
