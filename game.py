@@ -3,6 +3,7 @@ import html
 import io
 import os
 import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -220,15 +221,15 @@ def run_migrations():
 run_migrations()
 
 WORDS = {
-    "easy": list(set(w.lower() for w in DEFAULT_EASY if len(w) >= 4)),
-    "medium": list(set(w.lower() for w in DEFAULT_MEDIUM if len(w) >= 6)),
-    "hard": list(set(w.lower() for w in DEFAULT_HARD if len(w) >= 8))
+    "easy": list(set(w.lower() for w in DEFAULT_EASY if len(w) >= 3)),
+    "medium": list(set(w.lower() for w in DEFAULT_MEDIUM if len(w) >= 3)),
+    "hard": list(set(w.lower() for w in DEFAULT_HARD if len(w) >= 3))
 }
 
 custom_rows = DB.execute("SELECT difficulty, word FROM custom_words").fetchall()
 for row in custom_rows:
-    diff = row["difficulty"]
-    w = row["word"].lower()
+    diff = row["difficulty"].lower()
+    w = row["word"].lower().strip()
     if diff in WORDS and w not in WORDS[diff]:
         WORDS[diff].append(w)
 
@@ -317,7 +318,7 @@ def get_mention(user_obj=None, user_id=None, first_name=None, username=None):
     return f"<a href='tg://openmessage?user_id={u_id}'>{clean_name}</a>"
 
 def clean_answer(text):
-    return "".join(c.lower() for c in text if c.isalnum())
+    return "".join(c.lower() for c in str(text) if c.isalnum())
 
 def jumble_word(word):
     letters = list(word)
@@ -746,8 +747,7 @@ async def help_cmd(_, message: Message):
         text += (
             "\n\n<blockquote>🔐 <b>𝐀ᴜᴛʜ / 𝐖ᴏʀᴅ 𝐁ᴀɴᴋ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
             "• <code>/word</code> — 𝐕ɪᴇᴡ ᴄᴀᴛᴇɢᴏʀɪᴢᴇᴅ ᴡᴏʀᴅ ʙᴀɴᴋ\n"
-            "• <code>/word easy cat dog bird tree</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ ᴡᴏʀᴅs\n"
-            "• <code>/addword easy apple banana</code> — 𝐀ᴅᴅ sɪɴɢʟᴇ/ᴍᴜʟᴛɪᴘʟᴇ ᴡᴏʀᴅs\n"
+            "• <code>/addword easy cat dog bird tree</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ ᴡᴏʀᴅs\n"
             "• <code>/delword easy word</code> — 𝐃ᴇʟᴇᴛᴇ ᴡᴏʀᴅ ғʀᴏᴍ ʙᴀɴᴋ\n"
             "• <code>/setpoints [easy|med|hard] [pts]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ᴘᴏɪɴᴛs\n"
             "• <code>/sethint [easy|med|hard] [hints]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ʜɪɴᴛs\n"
@@ -1291,23 +1291,57 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# WORD BANK MANAGEMENT
+# ROBUST WORD BANK MANAGEMENT (BULK ADD & PARSE ENGINE)
 # ============================================================
 
-@app.on_message(filters.command("addword"))
+def process_bulk_words_addition(difficulty: str, raw_text: str):
+    difficulty = difficulty.lower().strip()
+    if difficulty not in WORDS:
+        return None, None
+
+    # Comprehensive separator regex: handles spaces, newlines, commas, quotes, semicolons
+    tokens = re.split(r"[\s,;\"'\n\r]+", raw_text)
+    
+    added = []
+    skipped = []
+
+    for token in tokens:
+        w = "".join(c.lower() for c in token if c.isalpha()).strip()
+        if len(w) >= 3:
+            if w not in WORDS[difficulty]:
+                WORDS[difficulty].append(w)
+                DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, w))
+                added.append(w)
+            else:
+                skipped.append(w)
+
+    DB.commit()
+    return added, skipped
+
+@app.on_message(filters.command(["addword", "addwords"]))
 async def addword_cmd(_, message: Message):
     if not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Aap authorized nahi hain.")
+        return await message.reply_text("<blockquote>❌ <b>Aap authorized nahi hain.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     if len(message.command) < 3:
-        return await message.reply_text("Usage:\n<code>/addword easy apple banana orange</code>\n<code>/addword medium computer network</code>\n<code>/addword hard international transformation</code>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(
+            "<blockquote><b>Usage (Single ya Bulk):</b>\n"
+            "• <code>/addword easy apple banana orange</code>\n"
+            "• <code>/addword medium computer network database</code>\n"
+            "• <code>/addword hard international transformation</code></blockquote>",
+            parse_mode=ParseMode.HTML
+        )
 
     difficulty = message.command[1].lower()
     if difficulty not in WORDS:
-        return await message.reply_text("❌ Valid difficulties: <code>easy</code>, <code>medium</code>, <code>hard</code>.", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b>Category must be:</b> <code>easy</code>, <code>medium</code>, ya <code>hard</code>.</blockquote>", parse_mode=ParseMode.HTML)
 
-    raw_words = message.text.split(None, 2)[2].replace(",", " ").split()
-    added, skipped = handle_bulk_add_words(difficulty, raw_words)
+    # Extract all text following the difficulty keyword
+    raw_payload = message.text.split(None, 2)[2]
+    added, skipped = process_bulk_words_addition(difficulty, raw_payload)
+
+    if not added and not skipped:
+        return await message.reply_text("<blockquote>❌ <b>Koi valid word (kam se kam 3 letters) nahi mila.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     msg_text = f"<blockquote>✅ <b>{len(added)}</b> word(s) successfully added to <b>{difficulty.upper()}</b> bank!"
     if skipped:
@@ -1352,12 +1386,13 @@ async def words_menu_cmd(_, message: Message):
     if not is_authed(message.from_user.id):
         return await message.reply_text("❌ Aap authorized nahi hain.")
 
+    # Direct bulk word addition via /word <diff> <words>
     if len(message.command) >= 3 and message.command[1].lower() in WORDS:
-        diff = message.command[1].lower()
-        raw_words = message.text.split(None, 2)[2].replace(",", " ").split()
-        added, skipped = handle_bulk_add_words(diff, raw_words)
+        difficulty = message.command[1].lower()
+        raw_payload = message.text.split(None, 2)[2]
+        added, skipped = process_bulk_words_addition(difficulty, raw_payload)
         
-        msg_text = f"<blockquote>✅ <b>{len(added)}</b> word(s) successfully added to <b>{diff.upper()}</b> bank!"
+        msg_text = f"<blockquote>✅ <b>{len(added)}</b> word(s) successfully added to <b>{difficulty.upper()}</b> bank!"
         if skipped:
             msg_text += f"\n⚠️ <i>{len(skipped)} word(s) already exist karte the (Skipped).</i>"
         msg_text += "</blockquote>"
@@ -1384,7 +1419,7 @@ async def words_menu_cmd(_, message: Message):
         f"🟡 <b>𝐌ᴇᴅɪᴜᴍ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['medium'])}</code>\n"
         f"🔴 <b>𝐇ᴀʀᴅ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['hard'])}</code>\n\n"
         "📌 <b>𝐁ᴜʟᴋ 𝐖ᴏʀᴅs 𝐀ᴅᴅ:</b>\n"
-        "<code>/word easy cat dog bird tree</code>\n\n"
+        "<code>/addword easy cat dog bird tree lion</code>\n\n"
         "Neeche buttons par click karke category ke words check karein (Single-tap copy):</blockquote>",
         reply_markup=kb,
         parse_mode=ParseMode.HTML
@@ -1494,10 +1529,10 @@ async def jumble_fight_cmd(_, message: Message):
     )
 
 # ============================================================
-# UNIFIED ANSWER HANDLER (BYPASSES ALL '/' COMMANDS)
+# UNIFIED ANSWER HANDLER (CLEAN COMMAND ISOLATION)
 # ============================================================
 
-@app.on_message(filters.text & ~filters.regex(r"^/"))
+@app.on_message(filters.text & ~filters.regex(r"^[/!#\.]"))
 async def unified_answer_handler(_, message: Message):
     if not message.from_user:
         return
@@ -1762,7 +1797,7 @@ async def callback_router(_, query: CallbackQuery):
                 f"🟡 <b>𝐌ᴇᴅɪᴜᴍ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['medium'])}</code>\n"
                 f"🔴 <b>𝐇ᴀʀᴅ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['hard'])}</code>\n\n"
                 "📌 <b>𝐁ᴜʟᴋ 𝐖ᴏʀᴅs 𝐀ᴅᴅ:</b>\n"
-                "<code>/word easy cat dog bird tree</code>\n\n"
+                "<code>/addword easy cat dog bird tree lion</code>\n\n"
                 "Neeche buttons par click karke category ke words check karein (Single-tap copy):</blockquote>",
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML
@@ -2031,13 +2066,11 @@ async def resume_all_active_games():
         c_id = row["chat_id"]
         diff = row["default_diff"] or "medium"
         try:
-            # Clear hanging stale puzzles from previous session
             DB.execute("DELETE FROM games WHERE chat_id=?", (c_id,))
             DB.commit()
             
-            # Start fresh puzzle
             await start_game(c_id, diff, c_id)
-            await asyncio.sleep(0.8)  # Flood protection delay
+            await asyncio.sleep(0.8)
         except Exception as e:
             print(f"Error auto-resuming game in {c_id}: {e}")
 
