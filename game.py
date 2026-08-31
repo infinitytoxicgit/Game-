@@ -345,6 +345,9 @@ def choose_word(chat_id, difficulty):
         DB.commit()
         available = pool
 
+    if not available:
+        return "JUMBLE"
+
     word = random.choice(available)
     DB.execute("INSERT OR IGNORE INTO used_words(chat_id, difficulty, word) VALUES (?, ?, ?)", (chat_id, difficulty, word))
     DB.commit()
@@ -747,8 +750,9 @@ async def help_cmd(_, message: Message):
         text += (
             "\n\n<blockquote>🔐 <b>𝐀ᴜᴛʜ / 𝐖ᴏʀᴅ 𝐁ᴀɴᴋ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
             "• <code>/word</code> — 𝐕ɪᴇᴡ ᴄᴀᴛᴇɢᴏʀɪᴢᴇᴅ ᴡᴏʀᴅ ʙᴀɴᴋ\n"
-            "• <code>/addword easy cat dog bird tree</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ ᴡᴏʀᴅs\n"
+            "• <code>/addword easy cat dog bird</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ ᴡᴏʀᴅs\n"
             "• <code>/delword easy word</code> — 𝐃ᴇʟᴇᴛᴇ ᴡᴏʀᴅ ғʀᴏᴍ ʙᴀɴᴋ\n"
+            "• <code>/delallword easy</code> — <b>𝐃ᴇʟᴇᴛᴇ ᴀʟʟ ᴡᴏʀᴅs ᴏғ ᴀ ᴍᴏᴅᴇ</b>\n"
             "• <code>/setpoints [easy|med|hard] [pts]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ᴘᴏɪɴᴛs\n"
             "• <code>/sethint [easy|med|hard] [hints]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ʜɪɴᴛs\n"
             "• <code>/setdaily [points]</code> — 𝐒ᴇᴛ ᴅᴀɪʟʏ ᴄʟᴀɪᴍ ʀᴇᴡᴀʀᴅ\n"
@@ -1291,242 +1295,44 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# ROBUST WORD BANK MANAGEMENT (BULK ADD & PARSE ENGINE)
+# BULK CLEAR / DELETE ALL WORDS COMMAND
 # ============================================================
 
-def process_bulk_words_addition(difficulty: str, raw_text: str):
-    difficulty = difficulty.lower().strip()
-    if difficulty not in WORDS:
-        return None, None
-
-    # Comprehensive separator regex: handles spaces, newlines, commas, quotes, semicolons
-    tokens = re.split(r"[\s,;\"'\n\r]+", raw_text)
-    
-    added = []
-    skipped = []
-
-    for token in tokens:
-        w = "".join(c.lower() for c in token if c.isalpha()).strip()
-        if len(w) >= 3:
-            if w not in WORDS[difficulty]:
-                WORDS[difficulty].append(w)
-                DB.execute("INSERT OR IGNORE INTO custom_words(difficulty, word) VALUES (?, ?)", (difficulty, w))
-                added.append(w)
-            else:
-                skipped.append(w)
-
-    DB.commit()
-    return added, skipped
-
-@app.on_message(filters.command(["addword", "addwords"]))
-async def addword_cmd(_, message: Message):
+@app.on_message(filters.command(["delallword", "delallwords", "clearword", "clearwords"]))
+async def del_all_words_cmd(_, message: Message):
     if not is_authed(message.from_user.id):
-        return await message.reply_text("<blockquote>❌ <b>Aap authorized nahi hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Auth users hi words clear kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
 
-    if len(message.command) < 3:
+    if len(message.command) < 2:
         return await message.reply_text(
-            "<blockquote><b>Usage (Single ya Bulk):</b>\n"
-            "• <code>/addword easy apple banana orange</code>\n"
-            "• <code>/addword medium computer network database</code>\n"
-            "• <code>/addword hard international transformation</code></blockquote>",
+            "<blockquote><b>Usage:</b>\n"
+            "• <code>/delallword easy</code> — Easy mode ke saare words delete karein\n"
+            "• <code>/delallword medium</code> — Medium mode ke saare words delete karein\n"
+            "• <code>/delallword hard</code> — Hard mode ke saare words delete karein</blockquote>",
             parse_mode=ParseMode.HTML
         )
 
-    difficulty = message.command[1].lower()
-    if difficulty not in WORDS:
+    diff = message.command[1].lower().strip()
+    if diff not in WORDS:
         return await message.reply_text("<blockquote>❌ <b>Category must be:</b> <code>easy</code>, <code>medium</code>, ya <code>hard</code>.</blockquote>", parse_mode=ParseMode.HTML)
 
-    # Extract all text following the difficulty keyword
-    raw_payload = message.text.split(None, 2)[2]
-    added, skipped = process_bulk_words_addition(difficulty, raw_payload)
-
-    if not added and not skipped:
-        return await message.reply_text("<blockquote>❌ <b>Koi valid word (kam se kam 3 letters) nahi mila.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    msg_text = f"<blockquote>✅ <b>{len(added)}</b> word(s) successfully added to <b>{difficulty.upper()}</b> bank!"
-    if skipped:
-        msg_text += f"\n⚠️ <i>{len(skipped)} word(s) already exist karte the (Skipped).</i>"
-    msg_text += "</blockquote>"
-
-    res = await message.reply_text(msg_text, parse_mode=ParseMode.HTML)
-    asyncio.create_task(delete_after(message, 5))
-    asyncio.create_task(delete_after(res, 5))
-
-@app.on_message(filters.command("delword"))
-async def delword_cmd(_, message: Message):
-    if not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Aap authorized nahi hain.")
-
-    if len(message.command) < 3:
-        return await message.reply_text("Usage:\n<code>/delword easy apple</code>\n<code>/delword medium computer</code>\n<code>/delword hard international</code>", parse_mode=ParseMode.HTML)
-
-    difficulty = message.command[1].lower()
-    word_to_del = clean_answer(message.command[2])
-
-    if difficulty not in WORDS:
-        return await message.reply_text("❌ Valid difficulties: <code>easy</code>, <code>medium</code>, <code>hard</code>.", parse_mode=ParseMode.HTML)
-
-    if word_to_del not in WORDS[difficulty]:
-        res = await message.reply_text(f"<blockquote>❌ Word <b>'{word_to_del.upper()}'</b> {difficulty.upper()} bank mein nahi mila.</blockquote>", parse_mode=ParseMode.HTML)
-        asyncio.create_task(delete_after(message, 5))
-        asyncio.create_task(delete_after(res, 5))
-        return
-
-    WORDS[difficulty].remove(word_to_del)
-    DB.execute("DELETE FROM custom_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
-    DB.execute("DELETE FROM used_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
-    DB.commit()
-
-    res = await message.reply_text(f"<blockquote>🗑️ Word <b>'{word_to_del.upper()}'</b> deleted from <b>{difficulty.upper()}</b> bank!</blockquote>", parse_mode=ParseMode.HTML)
-    asyncio.create_task(delete_after(message, 5))
-    asyncio.create_task(delete_after(res, 5))
-
-@app.on_message(filters.command(["word", "words"]))
-async def words_menu_cmd(_, message: Message):
-    if not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Aap authorized nahi hain.")
-
-    # Direct bulk word addition via /word <diff> <words>
-    if len(message.command) >= 3 and message.command[1].lower() in WORDS:
-        difficulty = message.command[1].lower()
-        raw_payload = message.text.split(None, 2)[2]
-        added, skipped = process_bulk_words_addition(difficulty, raw_payload)
-        
-        msg_text = f"<blockquote>✅ <b>{len(added)}</b> word(s) successfully added to <b>{difficulty.upper()}</b> bank!"
-        if skipped:
-            msg_text += f"\n⚠️ <i>{len(skipped)} word(s) already exist karte the (Skipped).</i>"
-        msg_text += "</blockquote>"
-
-        res = await message.reply_text(msg_text, parse_mode=ParseMode.HTML)
-        asyncio.create_task(delete_after(message, 5))
-        asyncio.create_task(delete_after(res, 5))
-        return
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(f"🟢 𝐄ᴀsʏ ({len(WORDS['easy'])})", callback_data="wb_easy_1"),
-            InlineKeyboardButton(f"🟡 𝐌ᴇᴅɪᴜᴍ ({len(WORDS['medium'])})", callback_data="wb_medium_1"),
-            InlineKeyboardButton(f"🔴 𝐇ᴀʀᴅ ({len(WORDS['hard'])})", callback_data="wb_hard_1")
-        ],
-        [
-            InlineKeyboardButton("❌ 𝐂ʟᴏsᴇ", callback_data="close_panel")
-        ]
-    ])
-
-    await message.reply_text(
-        "<blockquote>📚 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐖𝐎𝐑𝐃 𝐁𝐀𝐍𝐊</b>\n\n"
-        f"🟢 <b>𝐄ᴀsʏ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['easy'])}</code>\n"
-        f"🟡 <b>𝐌ᴇᴅɪᴜᴍ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['medium'])}</code>\n"
-        f"🔴 <b>𝐇ᴀʀᴅ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['hard'])}</code>\n\n"
-        "📌 <b>𝐁ᴜʟᴋ 𝐖ᴏʀᴅs 𝐀ᴅᴅ:</b>\n"
-        "<code>/addword easy cat dog bird tree lion</code>\n\n"
-        "Neeche buttons par click karke category ke words check karein (Single-tap copy):</blockquote>",
-        reply_markup=kb,
-        parse_mode=ParseMode.HTML
-    )
-    asyncio.create_task(delete_after(message, 3))
-
-# ============================================================
-# JUMBLE GAME & FIGHT COMMANDS
-# ============================================================
-
-@app.on_message(filters.command("jumble"))
-async def jumble_cmd(_, message: Message):
-    ensure_user(message.from_user)
-    if message.chat.id in JUMBLE_FIGHT:
-        return await message.reply_text("<blockquote>⚔️ <b>Jumble Fight chal rahi hai, match khatam hone tak wait karein.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
-    DB.commit()
-
-    s = get_settings(message.chat.id)
-    default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
-    difficulty = message.command[1].lower() if len(message.command) > 1 else default_d
+    count = len(WORDS[diff])
     
-    if difficulty not in WORDS:
-        difficulty = "medium"
+    # 1. Clear In-Memory Pool
+    WORDS[diff] = []
+    
+    # 2. Clear Database records for this difficulty
+    DB.execute("DELETE FROM custom_words WHERE difficulty=?", (diff,))
+    DB.execute("DELETE FROM used_words WHERE difficulty=?", (diff,))
+    DB.commit()
 
-    await start_game(message.chat.id, difficulty, message)
-
-@app.on_message(filters.command(["jumblefight", "fight", "rapido"]))
-async def jumble_fight_cmd(_, message: Message):
-    if not is_group(message):
-        return await message.reply_text("<blockquote>❌ <b>Jumble Fight sirf groups mein chal sakta hai.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    target_user = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_user = message.reply_to_message.from_user
-    elif len(message.command) >= 2:
-        arg = message.command[1]
-        try:
-            if arg.isdigit():
-                target_user = await app.get_users(int(arg))
-            else:
-                target_user = await app.get_users(arg)
-        except Exception:
-            return await message.reply_text("❌ User nahi mila.")
-    elif message.entities:
-        for entity in message.entities:
-            if entity.type.name == "TEXT_MENTION" and entity.user:
-                target_user = entity.user
-                break
-
-    if not target_user:
-        return await message.reply_text("Usage:\n• <code>/jumblefight @username</code>\n• <code>/jumblefight UserID</code>\n• Reply to a user with <code>/jumblefight</code>", parse_mode=ParseMode.HTML)
-
-    if target_user.id == message.from_user.id:
-        return await message.reply_text("<blockquote>❌ <b>Khud ke sath fight nahi kar sakte.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    if target_user.is_bot:
-        return await message.reply_text("<blockquote>❌ <b>Bots ke sath match nahi ho sakta.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    ensure_user(message.from_user)
-    ensure_user(target_user)
-
-    key = message.chat.id
-    if key in JUMBLE_FIGHT:
-        return await message.reply_text("<blockquote>⚔️ <b>Is group mein already Jumble Fight chal rahi hai.</b></blockquote>", parse_mode=ParseMode.HTML)
-
-    m1 = get_mention(message.from_user)
-    m2 = get_mention(target_user)
-
-    FIGHT_LOBBY[key] = {
-        "p1": message.from_user.id,
-        "p2": target_user.id,
-        "p1_name": message.from_user.first_name,
-        "p2_name": target_user.first_name,
-        "m1": m1,
-        "m2": m2,
-        "difficulty": "medium",
-        "timer": 60
-    }
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🟢 𝐄ᴀsʏ", callback_data="f_diff_easy"),
-            InlineKeyboardButton("🟡 𝐌ᴇᴅɪᴜᴍ", callback_data="f_diff_medium"),
-            InlineKeyboardButton("🔴 𝐇ᴀʀᴅ", callback_data="f_diff_hard")
-        ],
-        [
-            InlineKeyboardButton("⏱️ 30s", callback_data="f_time_30"),
-            InlineKeyboardButton("⏱️ 45s", callback_data="f_time_45"),
-            InlineKeyboardButton("⏱️ 60s", callback_data="f_time_60")
-        ],
-        [
-            InlineKeyboardButton("✅ 𝐀ᴄᴄᴇᴘᴛ 𝐂ʜᴀʟʟᴇɴɢᴇ", callback_data="f_accept"),
-            InlineKeyboardButton("❌ 𝐃ᴇᴄʟɪɴᴇ", callback_data="f_decline")
-        ]
-    ])
-
-    await message.reply_text(
-        f"<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>\n\n"
-        f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ:</b> {m1} (<code>{message.from_user.id}</code>)\n"
-        f"🎯 <b>𝐓ᴀʀɢᴇᴛ:</b> {m2} (<code>{target_user.id}</code>)\n\n"
-        f"⚙️ <b>𝐒ᴇᴛᴛɪɴɢs:</b> Mode: <code>Medium</code> | Timer: <code>60s</code>\n\n"
-        f"👉 {m2}, match shuru karne ke liye <b>Accept Challenge</b> par click karo!</blockquote>",
-        reply_markup=kb,
+    res = await message.reply_text(
+        f"<blockquote>🗑️ <b>{diff.upper()} 𝐌𝐎𝐃𝐄 𝐂𝐋𝐄𝐀𝐑𝐄𝐃!</b>\n\n"
+        f"Is category ke total <b>{count} words</b> successfully database aur memory se delete kar diye gaye hain.</blockquote>",
         parse_mode=ParseMode.HTML
     )
+    asyncio.create_task(delete_after(message, 5))
+    asyncio.create_task(delete_after(res, 5))
 
 # ============================================================
 # UNIFIED ANSWER HANDLER (CLEAN COMMAND ISOLATION)
@@ -1732,7 +1538,7 @@ async def callback_router(_, query: CallbackQuery):
         end_idx = start_idx + per_page
         page_words = word_list[start_idx:end_idx]
 
-        formatted_list = "  •  ".join(f"<code>{w.upper()}</code>" for w in page_words)
+        formatted_list = "  •  ".join(f"<code>{w.upper()}</code>" for w in page_words) if page_words else "<i>Koi words available nahi hain.</i>"
 
         nav_row = []
         if page > 1:
@@ -1759,7 +1565,8 @@ async def callback_router(_, query: CallbackQuery):
             f"📌 <i>Tip: Tap on any word below to copy it!</i>\n\n"
             f"{formatted_list}\n\n"
             f"➕ <b>Add:</b> <code>/addword {diff} word</code>\n"
-            f"➖ <b>Del:</b> <code>/delword {diff} word</code></blockquote>"
+            f"➖ <b>Del:</b> <code>/delword {diff} word</code>\n"
+            f"🗑️ <b>Clear All:</b> <code>/delallword {diff}</code></blockquote>"
         )
 
         try:
@@ -2055,7 +1862,7 @@ async def show_settings_panel(message_obj, chat_id):
         pass
 
 # ============================================================
-# AUTO-RESUME GAMES ON BOT STARTUP (RELIABLE & SEQUENTIAL)
+# AUTO-RESUME GAMES ON BOT STARTUP
 # ============================================================
 
 async def resume_all_active_games():
