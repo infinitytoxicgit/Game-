@@ -207,7 +207,7 @@ def run_migrations():
         DB.execute("ALTER TABLE settings ADD COLUMN is_active INTEGER DEFAULT 1")
     if "auto_delete" not in cols:
         DB.execute("ALTER TABLE settings ADD COLUMN auto_delete INTEGER DEFAULT 0")
-    
+
     user_cols = [c[1] for c in DB.execute("PRAGMA table_info(users)").fetchall()]
     if "fight_wins" not in user_cols:
         DB.execute("ALTER TABLE users ADD COLUMN fight_wins INTEGER DEFAULT 0")
@@ -233,7 +233,7 @@ def run_migrations():
             real_pts = u["points"]
             history_sum_row = DB.execute("SELECT SUM(points) as total FROM score_history WHERE user_id = ?", (uid,)).fetchone()
             history_total = history_sum_row["total"] if history_sum_row and history_sum_row["total"] else 0
-            
+
             diff = real_pts - history_total
             if diff != 0:
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, 0, ?, ?)", (uid, diff, now))
@@ -533,9 +533,9 @@ async def start_game(chat_id, difficulty, message_or_chat):
     except Exception as e:
         print(f"Error sending puzzle to {chat_id}: {e}")
 
-    asyncio.create_task(expire_game(chat_id, puzzle_id, expires, difficulty))
+    asyncio.create_task(expire_game(chat_id, puzzle_id, expires))
 
-async def expire_game(chat_id, puzzle_id, expires, difficulty):
+async def expire_game(chat_id, puzzle_id, expires):
     await asyncio.sleep(max(0, expires - time.time()))
     if chat_id in JUMBLE_FIGHT:
         return
@@ -568,7 +568,8 @@ async def expire_game(chat_id, puzzle_id, expires, difficulty):
     await asyncio.sleep(3)
     s = get_settings(chat_id)
     if chat_id not in JUMBLE_FIGHT and s["is_active"]:
-        asyncio.create_task(start_game(chat_id, difficulty, chat_id))
+        next_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+        asyncio.create_task(start_game(chat_id, next_diff, chat_id))
 
 # ============================================================
 # JUMBLE FIGHT & JUMBLE BET FIGHT (1v1)
@@ -593,7 +594,7 @@ async def fight_timeout_task(chat_id, round_num, timer_duration):
         game = JUMBLE_FIGHT.get(chat_id)
         if game and game["round"] == round_num:
             word = game["word"]
-            
+
             s = get_settings(chat_id)
             if s["auto_delete"] and game.get("msg_id"):
                 await safe_delete_and_unpin(chat_id, game["msg_id"])
@@ -644,7 +645,7 @@ async def fight_next(chat_id):
 
     fight_tag = "BET FIGHT" if game.get("is_bet") else "FIGHT"
     image = make_puzzle_image(jumbled, f"{fight_tag} {diff.upper()}", game["round"])
-    
+
     title_header = "💰 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓" if game.get("is_bet") else "⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓"
     extra_info = f"\n💵 <b>𝐁ᴇᴛ:</b> <code>{game.get('bet_amount')} pts</code>" if game.get("is_bet") else ""
 
@@ -729,7 +730,7 @@ async def finish_fight(chat_id):
 
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (total_payout, winner))
                 DB.execute("UPDATE users SET bet_losses=bet_losses+1 WHERE user_id=?", (loser,))
-                
+
                 # Record in score_history
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, total_payout, now))
                 DB.commit()
@@ -752,7 +753,7 @@ async def finish_fight(chat_id):
 
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (win_reward, winner))
                 DB.execute("UPDATE users SET points=points+?, bet_losses=bet_losses+1 WHERE user_id=?", (loser_cashback, loser))
-                
+
                 # Accurate score_history entries
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, win_reward, now))
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (loser, chat_id, loser_cashback, now))
@@ -802,7 +803,8 @@ async def finish_fight(chat_id):
     s = get_settings(chat_id)
     if s["is_active"]:
         await app.send_message(chat_id, "<blockquote>🔄 <i>𝐑ᴇsᴜᴍɪɴɢ ɴᴏʀᴍᴀʟ 𝐉ᴜᴍʙʟᴇ 𝐆ᴀᴍᴇ...</i></blockquote>", parse_mode=ParseMode.HTML)
-        asyncio.create_task(start_game(chat_id, s["default_diff"], chat_id))
+        next_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+        asyncio.create_task(start_game(chat_id, next_diff, chat_id))
 
 # ============================================================
 # DATABASE BACKUP SYSTEM (MANUAL & AUTO BACKUP)
@@ -920,6 +922,8 @@ async def help_cmd(_, message: Message):
             "• <code>/sethint [easy|med|hard] [hints]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ʜɪɴᴛs\n"
             "• <code>/setdaily [points]</code> — 𝐒ᴇᴛ ᴅᴀɪʟʏ ᴄʟᴀɪᴍ ʀᴇᴡᴀʀᴅ\n"
             "• <code>/setbonus [points]</code> — 𝐒ᴇᴛ ɢʀᴏᴜᴘ ʙᴏɴᴜs ʀᴇᴡᴀʀᴅ\n"
+            "• <code>/addstar [user] [points]</code> — <b>Add Points/Stars</b>\n"
+            "• <code>/deductstar [user] [points]</code> — <b>Deduct Points/Stars</b>\n"
             "• <code>/update</code> — 𝐆ɪᴛ sᴛᴀsʜ, ᴘᴜʟʟ & 𝐀ᴜᴛᴏ-ʀᴇsᴜᴍᴇ</blockquote>"
         )
     if message.from_user and is_owner(message.from_user.id):
@@ -964,7 +968,7 @@ def format_lb_entry(user_id, name, username, is_private):
     clean_name = html.escape(str(name or "Player"))
     if is_private:
         return f"<b>{clean_name}</b>"
-    
+
     if username:
         return f"<a href='https://t.me/{username}'>{clean_name}</a> (<code>{user_id}</code>)"
     return f"<a href='tg://openmessage?user_id={user_id}'>{clean_name}</a> (<code>{user_id}</code>)"
@@ -972,7 +976,7 @@ def format_lb_entry(user_id, name, username, is_private):
 def build_leaderboard_text_and_kb(scope_type, chat_id):
     now = time.time()
     medals = ["🥇", "🥈", "🥉"]
-    
+
     if scope_type == "daily":
         since = now - 86400
         title = "📅 <b>𝐃𝐀𝐈𝐋𝐘 𝐆𝐑𝐎𝐔𝐏 𝐋𝐄𝐀𝐃𝐄𝐑𝐁𝐎𝐀𝐑𝐃 (24h)</b>"
@@ -986,7 +990,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
             ORDER BY total_pts DESC
             LIMIT 10
         """, (chat_id, since)).fetchall()
-        
+
     elif scope_type == "weekly":
         since = now - (86400 * 7)
         title = "🗓️ <b>𝐖𝐄𝐄𝐊𝐋𝐘 𝐆𝐑𝐎𝐔𝐏 𝐋𝐄𝐀𝐃𝐄𝐑𝐁𝐎𝐀𝐑𝐃 (7 Days)</b>"
@@ -1094,7 +1098,7 @@ async def settings_cmd(_, message: Message):
         ]
     ])
     await message.reply_text(
-        f"<blockquote>⚙️ <b>𝐉ᴜᴍʙʟᴇ 𝐆ʀᴏᴜᴘ 𝐒ᴇᴛᴛɪɴɢs</b>\n\n"
+        f"<blockquote>⚙️ <b>𝐉ᴜᴍʙʟᴇ 𝐆ʀᴏᴜᴘ 𝐒ᴇᴛᴛɪɴgs</b>\n\n"
         f"🟢 <b>𝐆ᴀᴍᴇ 𝐒ᴛᴀᴛᴜs:</b> <code>{'Running' if s['is_active'] else 'Stopped'}</code>\n"
         f"🗑️ <b>𝐀ᴜᴛᴏ 𝐃ᴇʟᴇᴛᴇ 𝐎ʟᴅ:</b> <code>{'Enabled' if s['auto_delete'] else 'Disabled'}</code>\n"
         f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
@@ -1121,7 +1125,7 @@ async def set_points_global(_, message: Message):
             pts = int(args[0])
         except ValueError:
             return await message.reply_text("❌ Invalid points number.")
-        
+
         set_global_config("points_easy", pts)
         set_global_config("points_medium", pts)
         set_global_config("points_hard", pts)
@@ -1252,7 +1256,7 @@ async def daily_cmd(_, message: Message):
         SET points = points + ?, last_daily = ?
         WHERE user_id = ?
     """, (reward, now, message.from_user.id))
-    
+
     DB.execute("""
         INSERT INTO score_history (user_id, chat_id, points, timestamp)
         VALUES (?, 0, ?, ?)
@@ -1282,7 +1286,7 @@ async def bonus_cmd(_, message: Message):
         bot_member = await message.chat.get_member("me")
         if bot_member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
             return await message.reply_text("<blockquote>⚠️ <b>Bonus claim karne ke liye pehle bot ko is group mein Admin Rights dein!</b></blockquote>", parse_mode=ParseMode.HTML)
-        
+
         if getattr(bot_member, "promoted_by", None):
             promoted_by_user_id = bot_member.promoted_by.id
     except Exception:
@@ -1336,6 +1340,129 @@ async def bonus_cmd(_, message: Message):
     )
 
 # ============================================================
+# POINTS MANAGEMENT: ADDSTAR & DEDUCTSTAR (OWNER & AUTH ONLY)
+# ============================================================
+
+async def resolve_target_and_amount(message: Message):
+    args = message.command[1:]
+    target = None
+    amount = 0
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        for a in args:
+            if a.isdigit():
+                amount = int(a)
+                break
+    elif len(args) >= 2:
+        user_param = args[0]
+        try:
+            if user_param.isdigit():
+                target = await app.get_users(int(user_param))
+            else:
+                target = await app.get_users(user_param)
+        except Exception:
+            pass
+
+        for a in args[1:]:
+            if a.isdigit():
+                amount = int(a)
+                break
+    elif message.entities and len(args) >= 2:
+        for entity in message.entities:
+            if entity.type.name == "TEXT_MENTION" and entity.user:
+                target = entity.user
+                break
+        for a in args:
+            if a.isdigit():
+                amount = int(a)
+                break
+
+    return target, amount
+
+@app.on_message(filters.command(["addstar", "addpoints"]))
+async def addstar_cmd(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Authorized users points add kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    target, amount = await resolve_target_and_amount(message)
+
+    if not target or amount <= 0:
+        return await message.reply_text(
+            "<blockquote>⭐ <b>Usage:</b>\n\n"
+            "• Kisi ke message par reply karke: <code>/addstar 100</code>\n"
+            "• Username se: <code>/addstar @username 100</code>\n"
+            "• User ID se: <code>/addstar 123456789 100</code></blockquote>",
+            parse_mode=ParseMode.HTML
+        )
+
+    if target.is_bot:
+        return await message.reply_text("<blockquote>❌ <b>Bots ke points update nahi kiye ja sakte.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    ensure_user(target)
+    now = time.time()
+    chat_id = message.chat.id if is_group(message) else 0
+
+    DB.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (amount, target.id))
+    DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (target.id, chat_id, amount, now))
+    DB.commit()
+
+    u = get_user(target.id)
+    target_mention = get_mention(target)
+    res = await message.reply_text(
+        f"<blockquote>⭐ <b>𝐒𝐓𝐀𝐑𝐒 / 𝐏𝐎𝐈𝐍𝐓𝐒 𝐀𝐃𝐃𝐄𝐃!</b>\n\n"
+        f"👤 <b>User:</b> {target_mention} (<code>{target.id}</code>)\n"
+        f"➕ <b>Added:</b> <code>+{amount} points</code>\n"
+        f"💰 <b>Total Balance:</b> <code>{u['points']} points</code></blockquote>",
+        parse_mode=ParseMode.HTML
+    )
+    asyncio.create_task(delete_after(message, 6))
+    asyncio.create_task(delete_after(res, 6))
+
+@app.on_message(filters.command(["deductstar", "deductpoints", "removestar"]))
+async def deductstar_cmd(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Authorized users points deduct kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    target, amount = await resolve_target_and_amount(message)
+
+    if not target or amount <= 0:
+        return await message.reply_text(
+            "<blockquote>🛡️ <b>Usage:</b>\n\n"
+            "• Kisi ke message par reply karke: <code>/deductstar 50</code>\n"
+            "• Username se: <code>/deductstar @username 50</code>\n"
+            "• User ID se: <code>/deductstar 123456789 50</code></blockquote>",
+            parse_mode=ParseMode.HTML
+        )
+
+    if target.is_bot:
+        return await message.reply_text("<blockquote>❌ <b>Bots ke points deduct nahi kiye ja sakte.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    ensure_user(target)
+    u = get_user(target.id)
+    current_points = u["points"] if u else 0
+    actual_deduct = min(current_points, amount)
+
+    now = time.time()
+    chat_id = message.chat.id if is_group(message) else 0
+
+    DB.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (actual_deduct, target.id))
+    DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (target.id, chat_id, -actual_deduct, now))
+    DB.commit()
+
+    u_updated = get_user(target.id)
+    target_mention = get_mention(target)
+    res = await message.reply_text(
+        f"<blockquote>🛡️ <b>𝐒𝐓𝐀𝐑𝐒 / 𝐏𝐎𝐈𝐍𝐓𝐒 𝐃𝐄𝐃𝐔𝐂𝐓𝐄𝐃!</b>\n\n"
+        f"👤 <b>User:</b> {target_mention} (<code>{target.id}</code>)\n"
+        f"➖ <b>Deducted:</b> <code>-{actual_deduct} points</code>\n"
+        f"💰 <b>Total Balance:</b> <code>{u_updated['points']} points</code></blockquote>",
+        parse_mode=ParseMode.HTML
+    )
+    asyncio.create_task(delete_after(message, 6))
+    asyncio.create_task(delete_after(res, 6))
+
+# ============================================================
 # PRIVACY SYSTEM (/private & /public)
 # ============================================================
 
@@ -1383,7 +1510,7 @@ async def update_bot_cmd(_, message: Message):
         subprocess.run(["git", "stash"], check=True, capture_output=True, text=True)
         pull_res = subprocess.run(["git", "pull"], check=True, capture_output=True, text=True)
         out = pull_res.stdout or "Updated successfully."
-        
+
         await msg.edit_text(f"<blockquote>✅ <b>Git Pull Output:</b>\n<code>{out[:500]}</code>\n\n🚀 <b>Restarting & Auto-resuming all active group games...</b></blockquote>", parse_mode=ParseMode.HTML)
         await asyncio.sleep(1.5)
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -1622,7 +1749,7 @@ async def del_all_words_cmd(_, message: Message):
 
     count = len(WORDS[diff])
     WORDS[diff] = []
-    
+
     DB.execute("DELETE FROM custom_words WHERE difficulty=?", (diff,))
     DB.execute("DELETE FROM used_words WHERE difficulty=?", (diff,))
     DB.commit()
@@ -1636,7 +1763,7 @@ async def del_all_words_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 5))
 
 # ============================================================
-# JUMBLE COMMAND (LOOP PUZZLE LAUNCHER)
+# JUMBLE COMMAND (LOOP PUZZLE LAUNCHER & AUTO-ENABLER)
 # ============================================================
 
 @app.on_message(filters.command("jumble"))
@@ -1645,15 +1772,19 @@ async def jumble_cmd(_, message: Message):
     if message.chat.id in JUMBLE_FIGHT:
         return await message.reply_text("<blockquote>⚔️ <b>Jumble Fight chal rahi hai, match khatam hone tak wait karein.</b></blockquote>", parse_mode=ParseMode.HTML)
 
+    # Automatically enable the bot in group settings if disabled
     DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
     DB.commit()
 
     s = get_settings(message.chat.id)
     default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
-    difficulty = message.command[1].lower() if len(message.command) > 1 else default_d
-    
-    if difficulty not in WORDS:
-        difficulty = "medium"
+
+    # One-time override: User command sets mode for this puzzle only; next ones strictly follow group default
+    if len(message.command) > 1:
+        req_diff = message.command[1].lower().strip()
+        difficulty = req_diff if req_diff in WORDS else default_d
+    else:
+        difficulty = default_d
 
     await start_game(message.chat.id, difficulty, message)
 
@@ -1743,7 +1874,7 @@ async def jumble_fight_cmd(_, message: Message):
     ])
 
     await message.reply_text(
-        f"<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>\n\n"
+        f"<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀ʟʟᴇɴɢᴇ!</b>\n\n"
         f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ:</b> {m1} (<code>{p1_id}</code>)\n"
         f"🎯 <b>𝐓ᴀʀɢᴇᴛ:</b> {m2} (<code>{target_user.id}</code>)\n\n"
         f"⚙️ <b>𝐒ᴇᴛᴛɪɴɢs:</b> Mode: <code>Medium</code> | Timer: <code>60s</code>\n\n"
@@ -1897,7 +2028,8 @@ ALL_BOT_COMMANDS = {
     "settings", "setting", "setpoints", "sethint", "setdaily", "setbonus", "daily", "bonus",
     "private", "public", "addword", "addwords", "delword", "delallword", "delallwords",
     "clearword", "clearwords", "word", "words", "auth", "unauth", "authlist", "update", "gitpull",
-    "stats", "stat", "mystats", "score", "leaderboard", "top", "rank", "lb", "backup", "dbbackup", "getdb"
+    "stats", "stat", "mystats", "score", "leaderboard", "top", "rank", "lb", "backup", "dbbackup", "getdb",
+    "addstar", "addpoints", "deductstar", "deductpoints", "removestar"
 }
 
 @app.on_message(filters.text & filters.group)
@@ -1934,7 +2066,7 @@ async def group_answer_handler(_, message: Message):
                         pass
 
                 game["scores"][user_id] += 1
-                
+
                 s = get_settings(chat_id)
                 if s["auto_delete"] and game.get("msg_id"):
                     await safe_delete_and_unpin(chat_id, game["msg_id"])
@@ -1947,7 +2079,7 @@ async def group_answer_handler(_, message: Message):
                 )
                 if s["auto_delete"]:
                     asyncio.create_task(delete_after(r_msg, 4))
-                    
+
                 await asyncio.sleep(2.5)
                 asyncio.create_task(fight_next(chat_id))
                 return
@@ -1977,7 +2109,7 @@ async def group_answer_handler(_, message: Message):
             SET points=points+?, solved=solved+1, streak=?, best_streak=?
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
-        
+
         # Positive point entry into score history
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
@@ -2005,7 +2137,8 @@ async def group_answer_handler(_, message: Message):
         await asyncio.sleep(3)
         s = get_settings(chat_id)
         if chat_id not in JUMBLE_FIGHT and s["is_active"]:
-            asyncio.create_task(start_game(chat_id, game["difficulty"], chat_id))
+            next_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+            asyncio.create_task(start_game(chat_id, next_diff, chat_id))
 
 # ============================================================
 # CALLBACK QUERIES ROUTER
@@ -2250,7 +2383,7 @@ async def callback_router(_, query: CallbackQuery):
         if data == "f_decline":
             if user_id != lobby["p2"] and user_id != lobby["p1"] and not await is_admin_or_owner(query.message.chat, user_id):
                 return await query.answer("❌ Sirf match players hi decline kar sakte hain.", show_alert=True)
-            
+
             del FIGHT_LOBBY[chat_id]
             await query.message.delete()
             return await query.answer("Challenge declined.")
@@ -2274,7 +2407,7 @@ async def callback_router(_, query: CallbackQuery):
 
                 DB.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (b_amt, lobby["p1"]))
                 DB.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (b_amt, lobby["p2"]))
-                
+
                 now = time.time()
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (lobby["p1"], chat_id, -b_amt, now))
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (lobby["p2"], chat_id, -b_amt, now))
@@ -2298,7 +2431,7 @@ async def callback_router(_, query: CallbackQuery):
                 "orig_stake": lobby.get("orig_stake", lobby.get("bet_amount", 0))
             }
             del FIGHT_LOBBY[chat_id]
-            
+
             await query.message.delete()
             await query.answer("🚀 Challenge Accepted!")
 
@@ -2311,7 +2444,7 @@ async def callback_router(_, query: CallbackQuery):
                 parse_mode=ParseMode.HTML
             )
             asyncio.create_task(delete_after(announcement, 4))
-            
+
             await asyncio.sleep(3)
             asyncio.create_task(fight_next(chat_id))
             return
@@ -2452,7 +2585,7 @@ async def callback_router(_, query: CallbackQuery):
 
         DB.execute("UPDATE games SET solved=1 WHERE chat_id=?", (chat_id,))
         DB.commit()
-        
+
         s = get_settings(chat_id)
         if s["auto_delete"] and game["message_id"]:
             await safe_delete_and_unpin(chat_id, game["message_id"])
@@ -2460,12 +2593,13 @@ async def callback_router(_, query: CallbackQuery):
         sk_msg = await query.message.reply_text(f"<blockquote>⏭️ <b>𝐒ᴋɪᴘᴘᴇᴅ!</b>\n<b>Answer:</b> <code>{game['word'].upper()}</code>\n\n🔄 <i>Next puzzle starting in 3 seconds...</i></blockquote>", parse_mode=ParseMode.HTML)
         if s["auto_delete"]:
             asyncio.create_task(delete_after(sk_msg, 4))
-            
+
         await query.answer("Skipped.")
         await asyncio.sleep(3)
         s = get_settings(chat_id)
         if s["is_active"]:
-            asyncio.create_task(start_game(chat_id, game["difficulty"], chat_id))
+            next_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
+            asyncio.create_task(start_game(chat_id, next_diff, chat_id))
 
     elif data == "newword":
         old = DB.execute("SELECT * FROM games WHERE chat_id=?", (chat_id,)).fetchone()
@@ -2473,7 +2607,7 @@ async def callback_router(_, query: CallbackQuery):
             return await query.answer("❌ Current puzzle abhi active hai.", show_alert=True)
 
         s = get_settings(chat_id)
-        difficulty = old["difficulty"] if old else s["default_diff"]
+        difficulty = s["default_diff"] if "default_diff" in s.keys() else "medium"
         await query.answer("🧩 Starting new puzzle...")
         asyncio.create_task(start_game(chat_id, difficulty, query.message))
 
@@ -2528,14 +2662,14 @@ async def show_settings_panel(message_obj, chat_id):
 async def resume_all_active_games():
     await asyncio.sleep(3)
     rows = DB.execute("SELECT chat_id, default_diff FROM settings WHERE is_active = 1 AND chat_id != 0").fetchall()
-    
+
     for row in rows:
         c_id = row["chat_id"]
         diff = row["default_diff"] or "medium"
         try:
             DB.execute("DELETE FROM games WHERE chat_id=?", (c_id,))
             DB.commit()
-            
+
             await start_game(c_id, diff, c_id)
             await asyncio.sleep(0.8)
         except Exception as e:
