@@ -676,6 +676,7 @@ async def finish_fight(chat_id):
     is_bet = game.get("is_bet", False)
     bet_amt = game.get("bet_amount", 0)
     is_rebet = game.get("is_rebet", False)
+    now = time.time()
 
     if s1 > s2:
         winner, loser = p1, p2
@@ -711,6 +712,9 @@ async def finish_fight(chat_id):
 
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (total_payout, winner))
                 DB.execute("UPDATE users SET bet_losses=bet_losses+1 WHERE user_id=?", (loser,))
+                
+                # Record in score_history so daily/weekly/monthly reflects accurately
+                DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, total_payout, now))
                 DB.commit()
 
                 result = (
@@ -731,6 +735,10 @@ async def finish_fight(chat_id):
 
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (win_reward, winner))
                 DB.execute("UPDATE users SET points=points+?, bet_losses=bet_losses+1 WHERE user_id=?", (loser_cashback, loser))
+                
+                # Accurate score_history for monthly calculation
+                DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, win_reward, now))
+                DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (loser, chat_id, loser_cashback, now))
                 DB.commit()
 
                 REBET_LOBBY[chat_id] = {
@@ -759,8 +767,11 @@ async def finish_fight(chat_id):
                     f"👉 {game['mentions'][loser]} chahe toh <b>25% Re-bet</b> karke 25%+25% pot aur <b>+100 Comeback Stars</b> jeet sakta hai!</blockquote>"
                 )
         else:
+            # Draw: Refund & record history
             DB.execute("UPDATE users SET points=points+? WHERE user_id=?", (bet_amt, p1))
             DB.execute("UPDATE users SET points=points+? WHERE user_id=?", (bet_amt, p2))
+            DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (p1, chat_id, bet_amt, now))
+            DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (p2, chat_id, bet_amt, now))
             DB.commit()
             result = (
                 f"<blockquote>🤝 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓 𝐃𝐑𝐀𝐖!</b>\n\n"
@@ -860,7 +871,7 @@ async def help_cmd(_, message: Message):
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ============================================================
-# STATS & LEADERBOARD COMMANDS
+# STATS & LEADERBOARD COMMANDS (SYNCED & BUG-FREE)
 # ============================================================
 
 @app.on_message(filters.command(["stats", "stat", "mystats", "score"]))
@@ -909,6 +920,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
             LEFT JOIN users u ON h.user_id = u.user_id
             WHERE h.chat_id = ? AND h.timestamp >= ?
             GROUP BY h.user_id
+            HAVING total_pts > 0
             ORDER BY total_pts DESC
             LIMIT 10
         """, (chat_id, since)).fetchall()
@@ -922,6 +934,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
             LEFT JOIN users u ON h.user_id = u.user_id
             WHERE h.chat_id = ? AND h.timestamp >= ?
             GROUP BY h.user_id
+            HAVING total_pts > 0
             ORDER BY total_pts DESC
             LIMIT 10
         """, (chat_id, since)).fetchall()
@@ -929,12 +942,14 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
     elif scope_type == "monthly":
         since = now - (86400 * 30)
         title = "📆 <b>𝐌𝐎𝐍𝐓𝐇𝐋𝐘 𝐆𝐋𝐎𝐁𝐀𝐋 𝐋𝐄𝐀𝐃𝐄𝐑𝐁𝐎𝐀𝐑𝐃 (30 Days)</b>"
+        # Monthly matches accurate points considering net gains (having total_pts > 0)
         rows = DB.execute("""
             SELECT h.user_id, u.name, u.username, u.is_private, SUM(h.points) as total_pts
             FROM score_history h
             LEFT JOIN users u ON h.user_id = u.user_id
             WHERE h.timestamp >= ?
             GROUP BY h.user_id
+            HAVING total_pts > 0
             ORDER BY total_pts DESC
             LIMIT 10
         """, (since,)).fetchall()
@@ -944,6 +959,7 @@ def build_leaderboard_text_and_kb(scope_type, chat_id):
         rows = DB.execute("""
             SELECT user_id, name, username, is_private, points as total_pts
             FROM users
+            WHERE points > 0
             ORDER BY points DESC
             LIMIT 10
         """).fetchall()
@@ -1828,7 +1844,6 @@ async def group_answer_handler(_, message: Message):
     if not message.from_user or not message.text:
         return
 
-    # Skip any command execution completely
     txt = message.text.strip()
     if txt.startswith("/") or txt.startswith("!") or txt.startswith("."):
         cmd_candidate = txt[1:].split()[0].split("@")[0].lower()
@@ -1902,6 +1917,7 @@ async def group_answer_handler(_, message: Message):
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
         
+        # Positive point entry into score history
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
             VALUES (?, ?, ?, ?)
@@ -2195,8 +2211,14 @@ async def callback_router(_, query: CallbackQuery):
                     del FIGHT_LOBBY[chat_id]
                     return await query.message.edit_text(f"<blockquote>❌ Aapke paas <code>{b_amt} points</code> nahi hain. Bet cancel ho gayi.</blockquote>", parse_mode=ParseMode.HTML)
 
+                # Deduct points from users table
                 DB.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (b_amt, lobby["p1"]))
                 DB.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (b_amt, lobby["p2"]))
+                
+                # Deduct points from score_history so monthly/weekly/daily leaderboards decrease immediately
+                now = time.time()
+                DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (lobby["p1"], chat_id, -b_amt, now))
+                DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (lobby["p2"], chat_id, -b_amt, now))
                 DB.commit()
 
             JUMBLE_FIGHT[chat_id] = {
@@ -2441,7 +2463,7 @@ async def show_settings_panel(message_obj, chat_id):
         pass
 
 # ============================================================
-# AUTO-RESUME GAMES ON BOT STARTUP
+# AUTO-RESUME GAMES ON BOT STARTUP (RELIABLE & SEQUENTIAL)
 # ============================================================
 
 async def resume_all_active_games():
