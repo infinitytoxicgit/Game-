@@ -805,6 +805,51 @@ async def finish_fight(chat_id):
         asyncio.create_task(start_game(chat_id, s["default_diff"], chat_id))
 
 # ============================================================
+# DATABASE BACKUP SYSTEM (MANUAL & AUTO BACKUP)
+# ============================================================
+
+@app.on_message(filters.command(["backup", "dbbackup", "getdb"]))
+async def backup_db_cmd(_, message: Message):
+    if not message.from_user or not is_owner(message.from_user.id):
+        return await message.reply_text("❌ Sirf Bot Owner database backup le sakta hai.")
+
+    if not os.path.exists("jumble_game.db"):
+        return await message.reply_text("❌ Database file nahi mili!")
+
+    status_msg = await message.reply_text("📦 <i>Exporting database backup...</i>", parse_mode=ParseMode.HTML)
+    try:
+        await message.reply_document(
+            document="jumble_game.db",
+            caption=(
+                "<blockquote>💾 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐎𝐓 𝐃𝐀𝐓𝐀𝐁𝐀𝐒𝐄 𝐁𝐀𝐂𝐊𝐔𝐏</b>\n\n"
+                f"📅 <b>Date:</b> <code>{time.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                "📌 <i>Naye VPS par shift karte waqt yeh file bot ke folder me replace kar dena.</i></blockquote>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
+        await status_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Backup failed: <code>{str(e)}</code>")
+
+async def auto_backup_task():
+    while True:
+        await asyncio.sleep(21600)  # 6 Hours interval
+        try:
+            if os.path.exists("jumble_game.db"):
+                await app.send_document(
+                    chat_id=OWNER_ID,
+                    document="jumble_game.db",
+                    caption=(
+                        "<blockquote>🤖 <b>𝐀𝐔𝐓𝐎 𝐃𝐀𝐓𝐀𝐁𝐀𝐒𝐄 𝐁𝐀𝐂𝐊𝐔𝐏 (6h Interval)</b>\n\n"
+                        f"⏰ <b>Time:</b> <code>{time.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                        "Agar VPS achanak band ho jaye toh yeh file use karein.</blockquote>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+        except Exception as e:
+            print(f"Auto-backup error: {e}")
+
+# ============================================================
 # COMMAND HANDLERS
 # ============================================================
 
@@ -882,12 +927,13 @@ async def help_cmd(_, message: Message):
             "\n\n<blockquote>👑 <b>𝐎ᴡɴᴇʀ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
             "• <code>/auth @user</code> — 𝐆ʀᴀɴᴛ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
             "• <code>/unauth @user</code> — 𝐑ᴇᴠᴏᴋᴇ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
-            "• <code>/authlist</code> — 𝐋ɪsᴛ ᴏғ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴜsᴇʀs</blockquote>"
+            "• <code>/authlist</code> — 𝐋ɪsᴛ ᴏғ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴜsᴇʀs\n"
+            "• <code>/backup</code> — 𝐃ᴏᴡɴʟᴏᴀᴅ 𝐋ᴀᴛᴇsᴛ 𝐃ᴀᴛᴀʙᴀsᴇ (.db)</blockquote>"
         )
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ============================================================
-# STATS & LEADERBOARD COMMANDS (SYNCED & ACCURATE)
+# STATS & LEADERBOARD COMMANDS
 # ============================================================
 
 @app.on_message(filters.command(["stats", "stat", "mystats", "score"]))
@@ -1054,12 +1100,10 @@ async def settings_cmd(_, message: Message):
         f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
         f"⏱️ <b>𝐓ɪᴍᴇʀs:</b> Easy: <code>{s['easy']}s</code> | Med: <code>{s['medium']}s</code> | Hard: <code>{s['hard']}s</code>\n\n"
         f"🌍 <b>𝐆ʟᴏʙᴀʟ 𝐑ᴇᴡᴀʀᴅs:</b> Easy: <code>{p_easy}pts</code> | Med: <code>{p_med}pts</code> | Hard: <code>{p_hard}pts</code>\n"
-        f"💡 <b>𝐆ʟᴏʙᴀʟ 𝐇ɪɴᴛs:</b> Easy: <code>{h_easy}</code> | Med: <code>{h_med}</code> | Hard: <code>{h_hard}</code></blockquote>"
+        f"💡 <b>𝐆ʟᴏʙᴀʟ 𝐇ɪɴᴛs:</b> Easy: <code>{h_easy}</code> | Med: <code>{h_med}</code> | Hard: <code>{h_hard}</code></blockquote>",
+        reply_markup=kb,
+        parse_mode=ParseMode.HTML
     )
-    try:
-        await message_obj.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-    except MessageNotModified:
-        pass
 
 # ============================================================
 # GLOBAL CONFIG & SETTINGS COMMANDS
@@ -1853,7 +1897,7 @@ ALL_BOT_COMMANDS = {
     "settings", "setting", "setpoints", "sethint", "setdaily", "setbonus", "daily", "bonus",
     "private", "public", "addword", "addwords", "delword", "delallword", "delallwords",
     "clearword", "clearwords", "word", "words", "auth", "unauth", "authlist", "update", "gitpull",
-    "stats", "stat", "mystats", "score", "leaderboard", "top", "rank", "lb"
+    "stats", "stat", "mystats", "score", "leaderboard", "top", "rank", "lb", "backup", "dbbackup", "getdb"
 }
 
 @app.on_message(filters.text & filters.group)
@@ -1934,6 +1978,7 @@ async def group_answer_handler(_, message: Message):
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
         
+        # Positive point entry into score history
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
             VALUES (?, ?, ?, ?)
@@ -2503,4 +2548,5 @@ async def resume_all_active_games():
 if __name__ == "__main__":
     print("🚀 Advanced Jumble & Jumble Bet Fight Bot Started Successfully!")
     asyncio.get_event_loop().create_task(resume_all_active_games())
+    asyncio.get_event_loop().create_task(auto_backup_task())
     app.run()
