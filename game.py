@@ -887,7 +887,7 @@ async def help_cmd(_, message: Message):
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ============================================================
-# STATS & LEADERBOARD COMMANDS
+# STATS & LEADERBOARD COMMANDS (SYNCED & ACCURATE)
 # ============================================================
 
 @app.on_message(filters.command(["stats", "stat", "mystats", "score"]))
@@ -1054,10 +1054,12 @@ async def settings_cmd(_, message: Message):
         f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
         f"⏱️ <b>𝐓ɪᴍᴇʀs:</b> Easy: <code>{s['easy']}s</code> | Med: <code>{s['medium']}s</code> | Hard: <code>{s['hard']}s</code>\n\n"
         f"🌍 <b>𝐆ʟᴏʙᴀʟ 𝐑ᴇᴡᴀʀᴅs:</b> Easy: <code>{p_easy}pts</code> | Med: <code>{p_med}pts</code> | Hard: <code>{p_hard}pts</code>\n"
-        f"💡 <b>𝐆ʟᴏʙᴀʟ 𝐇ɪɴᴛs:</b> Easy: <code>{h_easy}</code> | Med: <code>{h_med}</code> | Hard: <code>{h_hard}</code></blockquote>",
-        reply_markup=kb,
-        parse_mode=ParseMode.HTML
+        f"💡 <b>𝐆ʟᴏʙᴀʟ 𝐇ɪɴᴛs:</b> Easy: <code>{h_easy}</code> | Med: <code>{h_med}</code> | Hard: <code>{h_hard}</code></blockquote>"
     )
+    try:
+        await message_obj.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except MessageNotModified:
+        pass
 
 # ============================================================
 # GLOBAL CONFIG & SETTINGS COMMANDS
@@ -2475,7 +2477,7 @@ async def show_settings_panel(message_obj, chat_id):
         pass
 
 # ============================================================
-# AUTO-RESUME GAMES ON BOT STARTUP
+# AUTO-RESUME GAMES ON BOT STARTUP (RELIABLE & SEQUENTIAL)
 # ============================================================
 
 async def resume_all_active_games():
