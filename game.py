@@ -641,7 +641,10 @@ async def fight_next(chat_id):
 
     game["word"] = word
     game["expires"] = time.time() + game["timer"]
-    game["round_hints"] = defaultdict(lambda: {"count": 0, "indices": []})
+
+    # Clear round specific revealed indices but preserve match hint count
+    for pid in game["players"]:
+        game["user_hints"][pid]["indices"] = []
 
     fight_tag = "BET FIGHT" if game.get("is_bet") else "FIGHT"
     image = make_puzzle_image(jumbled, f"{fight_tag} {diff.upper()}", game["round"])
@@ -657,6 +660,7 @@ async def fight_next(chat_id):
                 f"<blockquote>{title_header} — 𝐑𝐎𝐔𝐍𝐃 {game['round']}/10</b>\n\n"
                 f"🎯 <b>𝐃ɪғғɪᴄᴜʟᴛʏ:</b> <code>{diff.title()}</code>\n"
                 f"⏱️ <b>𝐓ɪᴍᴇ:</b> <code>{game['timer']}s</code>{extra_info}\n"
+                f"💡 <b>𝐌ᴀᴛᴄʜ 𝐇ɪɴᴛs:</b> <code>{game['max_hints']} hints per player</code>\n"
                 f"🔀 <b>𝐒ᴏʟᴠᴇ ғᴀsᴛᴇsᴛ!</b>\n"
                 f"👥 <b>𝐏ʟᴀʏᴇʀs:</b> {game['mentions'][game['players'][0]]} 🆚 {game['mentions'][game['players'][1]]}</blockquote>"
             ),
@@ -1065,6 +1069,26 @@ async def leaderboard_cmd(_, message: Message):
 # ============================================================
 # SETTINGS PANEL
 # ============================================================
+
+def build_timers_keyboard(s):
+    easy_val = s["easy"]
+    med_val = s["medium"]
+    hard_val = s["hard"]
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"{'✅ ' if easy_val==60 else ''}Easy: 60s", callback_data="set_t_easy_60"),
+            InlineKeyboardButton(f"{'✅ ' if easy_val==120 else ''}Easy: 120s", callback_data="set_t_easy_120")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if med_val==180 else ''}Med: 180s", callback_data="set_t_medium_180"),
+            InlineKeyboardButton(f"{'✅ ' if med_val==300 else ''}Med: 300s", callback_data="set_t_medium_300")
+        ],
+        [
+            InlineKeyboardButton(f"{'✅ ' if hard_val==300 else ''}Hard: 300s", callback_data="set_t_hard_300"),
+            InlineKeyboardButton(f"{'✅ ' if hard_val==600 else ''}Hard: 600s", callback_data="set_t_hard_600")
+        ],
+        [InlineKeyboardButton("🔙 𝐁ᴀᴄᴋ", callback_data="set_back")]
+    ])
 
 @app.on_message(filters.command(["settings", "setting"]))
 async def settings_cmd(_, message: Message):
@@ -2194,23 +2218,25 @@ async def callback_router(_, query: CallbackQuery):
         if not game or user_id not in game["players"]:
             return await query.answer("❌ Sirf match players hints le sakte hain.", show_alert=True)
 
-        difficulty = game["difficulty"]
-        hint_limit = get_global_config(f"hints_{difficulty}", 3)
+        hint_limit = game.get("max_hints", 3)
+        p_data = game.get("user_hints", {}).get(user_id)
+        if not p_data:
+            return await query.answer("❌ Hint data error.", show_alert=True)
 
-        p_hint = game["round_hints"][user_id]
-        if p_hint["count"] >= hint_limit:
-            return await query.answer(f"❌ Is round ke {hint_limit} hints use ho chuke hain!", show_alert=True)
+        if p_data["count"] >= hint_limit:
+            return await query.answer(f"❌ Is match ke sabhi {hint_limit} hints aapne use kar liye hain!", show_alert=True)
 
         word = game["word"]
-        avail = [i for i in range(len(word)) if i not in p_hint["indices"]]
+        avail = [i for i in range(len(word)) if i not in p_data["indices"]]
         if not avail:
             return await query.answer("❌ Aur letters reveal nahi ho sakte.", show_alert=True)
 
         idx = random.choice(avail)
-        p_hint["indices"].append(idx)
-        p_hint["count"] += 1
+        p_data["indices"].append(idx)
+        p_data["count"] += 1
 
-        return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRemaining: {hint_limit - p_hint['count']}/{hint_limit}", show_alert=True)
+        rem = hint_limit - p_data["count"]
+        return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nMatch Hints Left: {rem}/{hint_limit}", show_alert=True)
 
     elif data.startswith("lb_"):
         await query.answer()
@@ -2392,6 +2418,9 @@ async def callback_router(_, query: CallbackQuery):
             if user_id != lobby["p2"]:
                 return await query.answer("❌ Yeh challenge aapke liye nahi hai! Sirf opponent accept kar sakta hai.", show_alert=True)
 
+            diff = lobby["difficulty"]
+            match_hints = get_global_config(f"hints_{diff}", 3)
+
             if lobby.get("is_bet"):
                 b_amt = lobby["bet_amount"]
                 u1 = get_user(lobby["p1"])
@@ -2422,13 +2451,18 @@ async def callback_router(_, query: CallbackQuery):
                 "word": None,
                 "expires": None,
                 "task": None,
-                "difficulty": lobby["difficulty"],
+                "difficulty": diff,
                 "timer": lobby["timer"],
                 "msg_id": None,
                 "is_bet": lobby.get("is_bet", False),
                 "bet_amount": lobby.get("bet_amount", 0),
                 "is_rebet": lobby.get("is_rebet", False),
-                "orig_stake": lobby.get("orig_stake", lobby.get("bet_amount", 0))
+                "orig_stake": lobby.get("orig_stake", lobby.get("bet_amount", 0)),
+                "max_hints": match_hints,
+                "user_hints": {
+                    lobby["p1"]: {"count": 0, "indices": []},
+                    lobby["p2"]: {"count": 0, "indices": []}
+                }
             }
             del FIGHT_LOBBY[chat_id]
 
@@ -2440,6 +2474,7 @@ async def callback_router(_, query: CallbackQuery):
                 chat_id,
                 f"<blockquote>🔥 <b>𝐂ʜᴀʟʟᴇɴɢᴇ 𝐀ᴄᴄᴇᴘᴛᴇᴅ ʙʏ {lobby['m2']}!</b>\n\n"
                 f"⚔️ <b>{lobby['m1']}</b> 🆚 <b>{lobby['m2']}</b>{bet_text}\n"
+                f"💡 <b>Hint Limit:</b> <code>{match_hints} hints each for whole match</code>\n"
                 f"🚀 <i>𝐌ᴀᴛᴄʜ sᴛᴀʀᴛɪɴɢ ɪɴ 3 sᴇᴄᴏɴᴅs...</i></blockquote>",
                 parse_mode=ParseMode.HTML
             )
@@ -2538,21 +2573,8 @@ async def callback_router(_, query: CallbackQuery):
                 pass
 
         elif data == "set_menu_timers":
-            kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Easy: 60s", callback_data="set_t_easy_60"),
-                    InlineKeyboardButton("Easy: 120s", callback_data="set_t_easy_120")
-                ],
-                [
-                    InlineKeyboardButton("Med: 180s", callback_data="set_t_medium_180"),
-                    InlineKeyboardButton("Med: 300s", callback_data="set_t_medium_300")
-                ],
-                [
-                    InlineKeyboardButton("Hard: 300s", callback_data="set_t_hard_300"),
-                    InlineKeyboardButton("Hard: 600s", callback_data="set_t_hard_600")
-                ],
-                [InlineKeyboardButton("🔙 𝐁ᴀᴄᴋ", callback_data="set_back")]
-            ])
+            s = get_settings(chat_id)
+            kb = build_timers_keyboard(s)
             try:
                 await query.message.edit_text("<blockquote>⏱️ <b>Select Timer Duration:</b></blockquote>", reply_markup=kb, parse_mode=ParseMode.HTML)
             except MessageNotModified:
@@ -2566,11 +2588,21 @@ async def callback_router(_, query: CallbackQuery):
             await show_settings_panel(query.message, chat_id)
 
         elif data.startswith("set_t_"):
-            _, _, diff, secs = data.split("_")
-            DB.execute(f"UPDATE settings SET {diff}=? WHERE chat_id=?", (int(secs), chat_id))
-            DB.commit()
-            await query.answer(f"{diff.title()} timer updated to {secs}s")
-            await show_settings_panel(query.message, chat_id)
+            parts = data.split("_")
+            diff = parts[2].lower()
+            secs = int(parts[3])
+            
+            if diff in ("easy", "medium", "hard"):
+                DB.execute(f"UPDATE settings SET {diff}=? WHERE chat_id=?", (secs, chat_id))
+                DB.commit()
+                await query.answer(f"✅ {diff.title()} timer updated to {secs}s")
+
+            s = get_settings(chat_id)
+            kb = build_timers_keyboard(s)
+            try:
+                await query.message.edit_reply_markup(reply_markup=kb)
+            except MessageNotModified:
+                pass
 
         elif data == "set_back":
             await show_settings_panel(query.message, chat_id)
