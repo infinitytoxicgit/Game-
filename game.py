@@ -641,16 +641,20 @@ async def fight_next(chat_id):
 
     game["word"] = word
     game["expires"] = time.time() + game["timer"]
-
-    # Clear round specific revealed indices but preserve match hint count
-    for pid in game["players"]:
-        game["user_hints"][pid]["indices"] = []
+    
+    # Har round me dono players ke liye hints exact equal limit par fresh reset hongi
+    per_round_hints = int(get_global_config(f"hints_{diff}", 3))
+    game["max_hints"] = per_round_hints
+    game["hints_left"] = {p: per_round_hints for p in game["players"]}
+    game["round_revealed"] = {p: [] for p in game["players"]}
 
     fight_tag = "BET FIGHT" if game.get("is_bet") else "FIGHT"
     image = make_puzzle_image(jumbled, f"{fight_tag} {diff.upper()}", game["round"])
 
     title_header = "💰 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓" if game.get("is_bet") else "⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓"
     extra_info = f"\n💵 <b>𝐁ᴇᴛ:</b> <code>{game.get('bet_amount')} pts</code>" if game.get("is_bet") else ""
+
+    p1, p2 = game["players"]
 
     try:
         sent = await app.send_photo(
@@ -660,9 +664,9 @@ async def fight_next(chat_id):
                 f"<blockquote>{title_header} — 𝐑𝐎𝐔𝐍𝐃 {game['round']}/10</b>\n\n"
                 f"🎯 <b>𝐃ɪғғɪᴄᴜʟᴛʏ:</b> <code>{diff.title()}</code>\n"
                 f"⏱️ <b>𝐓ɪᴍᴇ:</b> <code>{game['timer']}s</code>{extra_info}\n"
-                f"💡 <b>𝐌ᴀᴛᴄʜ 𝐇ɪɴᴛs:</b> <code>{game['max_hints']} hints per player</code>\n"
+                f"💡 <b>𝐑ᴏᴜɴᴅ 𝐇ɪɴᴛs:</b> <code>{per_round_hints} hints each</code>\n"
                 f"🔀 <b>𝐒ᴏʟᴠᴇ ғᴀsᴛᴇsᴛ!</b>\n"
-                f"👥 <b>𝐏ʟᴀʏᴇʀs:</b> {game['mentions'][game['players'][0]]} 🆚 {game['mentions'][game['players'][1]]}</blockquote>"
+                f"👥 <b>𝐏ʟᴀʏᴇʀs:</b> {game['mentions'][p1]} 🆚 {game['mentions'][p2]}</blockquote>"
             ),
             reply_markup=fight_keyboard(),
             parse_mode=ParseMode.HTML
@@ -1194,7 +1198,7 @@ async def sethint_global(_, message: Message):
         set_global_config("hints_easy", h)
         set_global_config("hints_medium", h)
         set_global_config("hints_hard", h)
-        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye hints limit <b>{h} hints/word</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye hints limit <b>{h} hints/round</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
 
     elif len(args) == 2:
         category = args[0].lower()
@@ -1207,7 +1211,7 @@ async def sethint_global(_, message: Message):
             return await message.reply_text("❌ Invalid hint number.")
 
         set_global_config(f"hints_{category}", h)
-        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye <b>{category.title()}</b> hints limit <b>{h} hints/word</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye <b>{category.title()}</b> hints limit <b>{h} hints/round</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
 
     else:
         return await message.reply_text(
@@ -2218,25 +2222,24 @@ async def callback_router(_, query: CallbackQuery):
         if not game or user_id not in game["players"]:
             return await query.answer("❌ Sirf match players hints le sakte hain.", show_alert=True)
 
-        hint_limit = game.get("max_hints", 3)
-        p_data = game.get("user_hints", {}).get(user_id)
-        if not p_data:
-            return await query.answer("❌ Hint data error.", show_alert=True)
+        left = game["hints_left"].get(user_id, 0)
+        total_allowed = game.get("max_hints", 3)
 
-        if p_data["count"] >= hint_limit:
-            return await query.answer(f"❌ Is match ke sabhi {hint_limit} hints aapne use kar liye hain!", show_alert=True)
+        if left <= 0:
+            return await query.answer(f"❌ Is round ke saare {total_allowed} hints khatam ho chuke hain!", show_alert=True)
 
         word = game["word"]
-        avail = [i for i in range(len(word)) if i not in p_data["indices"]]
+        revealed = game["round_revealed"][user_id]
+        avail = [i for i in range(len(word)) if i not in revealed]
         if not avail:
-            return await query.answer("❌ Aur letters reveal nahi ho sakte.", show_alert=True)
+            return await query.answer("❌ Is round ke saare letters reveal ho chuke hain.", show_alert=True)
 
         idx = random.choice(avail)
-        p_data["indices"].append(idx)
-        p_data["count"] += 1
+        revealed.append(idx)
+        game["hints_left"][user_id] -= 1
+        rem = game["hints_left"][user_id]
 
-        rem = hint_limit - p_data["count"]
-        return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nMatch Hints Left: {rem}/{hint_limit}", show_alert=True)
+        return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRound Hints Left: {rem}/{total_allowed}", show_alert=True)
 
     elif data.startswith("lb_"):
         await query.answer()
@@ -2419,7 +2422,7 @@ async def callback_router(_, query: CallbackQuery):
                 return await query.answer("❌ Yeh challenge aapke liye nahi hai! Sirf opponent accept kar sakta hai.", show_alert=True)
 
             diff = lobby["difficulty"]
-            match_hints = get_global_config(f"hints_{diff}", 3)
+            per_round_hints = int(get_global_config(f"hints_{diff}", 3))
 
             if lobby.get("is_bet"):
                 b_amt = lobby["bet_amount"]
@@ -2458,10 +2461,14 @@ async def callback_router(_, query: CallbackQuery):
                 "bet_amount": lobby.get("bet_amount", 0),
                 "is_rebet": lobby.get("is_rebet", False),
                 "orig_stake": lobby.get("orig_stake", lobby.get("bet_amount", 0)),
-                "max_hints": match_hints,
-                "user_hints": {
-                    lobby["p1"]: {"count": 0, "indices": []},
-                    lobby["p2"]: {"count": 0, "indices": []}
+                "max_hints": per_round_hints,
+                "hints_left": {
+                    lobby["p1"]: per_round_hints,
+                    lobby["p2"]: per_round_hints
+                },
+                "round_revealed": {
+                    lobby["p1"]: [],
+                    lobby["p2"]: []
                 }
             }
             del FIGHT_LOBBY[chat_id]
@@ -2474,7 +2481,7 @@ async def callback_router(_, query: CallbackQuery):
                 chat_id,
                 f"<blockquote>🔥 <b>𝐂ʜᴀʟʟᴇɴɢᴇ 𝐀ᴄᴄᴇᴘᴛᴇᴅ ʙʏ {lobby['m2']}!</b>\n\n"
                 f"⚔️ <b>{lobby['m1']}</b> 🆚 <b>{lobby['m2']}</b>{bet_text}\n"
-                f"💡 <b>Hint Limit:</b> <code>{match_hints} hints each for whole match</code>\n"
+                f"💡 <b>Round Hints:</b> <code>{per_round_hints} hints each per round</code>\n"
                 f"🚀 <i>𝐌ᴀᴛᴄʜ sᴛᴀʀᴛɪɴɢ ɪɴ 3 sᴇᴄᴏɴᴅs...</i></blockquote>",
                 parse_mode=ParseMode.HTML
             )
