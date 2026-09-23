@@ -641,7 +641,7 @@ async def fight_next(chat_id):
 
     game["word"] = word
     game["expires"] = time.time() + game["timer"]
-
+    
     # Har round me dono players ke liye hints exact equal limit par fresh reset hongi
     per_round_hints = int(get_global_config(f"hints_{diff}", 3))
     game["max_hints"] = per_round_hints
@@ -2598,7 +2598,7 @@ async def callback_router(_, query: CallbackQuery):
             parts = data.split("_")
             diff = parts[2].lower()
             secs = int(parts[3])
-
+            
             if diff in ("easy", "medium", "hard"):
                 DB.execute(f"UPDATE settings SET {diff}=? WHERE chat_id=?", (secs, chat_id))
                 DB.commit()
@@ -2723,6 +2723,3 @@ if __name__ == "__main__":
     asyncio.get_event_loop().create_task(resume_all_active_games())
     asyncio.get_event_loop().create_task(auto_backup_task())
     app.run()
-
-
-
