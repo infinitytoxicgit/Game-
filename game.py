@@ -13,7 +13,7 @@ from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatMemberStatus, ParseMode
-from pyrogram.errors import MessageNotModified, RPCError
+from pyrogram.errors import MessageNotModified, RPCError, PeerIdInvalid, UserNotParticipant
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -222,9 +222,6 @@ def run_migrations():
     if "last_daily" not in user_cols:
         DB.execute("ALTER TABLE users ADD COLUMN last_daily REAL DEFAULT 0")
 
-    # ============================================================
-    # AUTOMATIC LEADERBOARD SYNC (Fixes Inflated Monthly Data)
-    # ============================================================
     try:
         users = DB.execute("SELECT user_id, points FROM users").fetchall()
         now = time.time()
@@ -518,6 +515,12 @@ async def start_game(chat_id, difficulty, message_or_chat):
     )
 
     try:
+        # Pre-resolve chat to avoid 'is_premium' and NoneType errors in Pyrogram
+        try:
+            await app.get_chat(chat_id)
+        except Exception:
+            pass
+
         if isinstance(message_or_chat, Message):
             sent = await message_or_chat.reply_photo(photo=image, caption=caption_text, reply_markup=normal_keyboard(), parse_mode=ParseMode.HTML)
         else:
@@ -532,6 +535,11 @@ async def start_game(chat_id, difficulty, message_or_chat):
             pass
     except Exception as e:
         print(f"Error sending puzzle to {chat_id}: {e}")
+        # Disable dead or inaccessible chats
+        if "peer id invalid" in str(e).lower() or "not a member" in str(e).lower():
+            DB.execute("UPDATE settings SET is_active=0 WHERE chat_id=?", (chat_id,))
+            DB.commit()
+        return
 
     asyncio.create_task(expire_game(chat_id, puzzle_id, expires))
 
@@ -641,8 +649,7 @@ async def fight_next(chat_id):
 
     game["word"] = word
     game["expires"] = time.time() + game["timer"]
-    
-    # Har round me dono players ke liye hints exact equal limit par fresh reset hongi
+
     per_round_hints = int(get_global_config(f"hints_{diff}", 3))
     game["max_hints"] = per_round_hints
     game["hints_left"] = {p: per_round_hints for p in game["players"]}
@@ -738,8 +745,6 @@ async def finish_fight(chat_id):
 
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (total_payout, winner))
                 DB.execute("UPDATE users SET bet_losses=bet_losses+1 WHERE user_id=?", (loser,))
-
-                # Record in score_history
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, total_payout, now))
                 DB.commit()
 
@@ -761,8 +766,6 @@ async def finish_fight(chat_id):
 
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (win_reward, winner))
                 DB.execute("UPDATE users SET points=points+?, bet_losses=bet_losses+1 WHERE user_id=?", (loser_cashback, loser))
-
-                # Accurate score_history entries
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, win_reward, now))
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (loser, chat_id, loser_cashback, now))
                 DB.commit()
@@ -826,7 +829,7 @@ async def backup_db_cmd(_, message: Message):
     if not os.path.exists("jumble_game.db"):
         return await message.reply_text("❌ Database file nahi mili!")
 
-    status_msg = await message.reply_text("📦 <i>Exporting database backup...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await message.reply_text("<blockquote>📦 <i>Exporting database backup...</i></blockquote>", parse_mode=ParseMode.HTML)
     try:
         await message.reply_document(
             document="jumble_game.db",
@@ -839,11 +842,11 @@ async def backup_db_cmd(_, message: Message):
         )
         await status_msg.delete()
     except Exception as e:
-        await status_msg.edit_text(f"❌ Backup failed: <code>{str(e)}</code>")
+        await status_msg.edit_text(f"<blockquote>❌ Backup failed: <code>{str(e)}</code></blockquote>", parse_mode=ParseMode.HTML)
 
 async def auto_backup_task():
     while True:
-        await asyncio.sleep(21600)  # 6 Hours interval
+        await asyncio.sleep(21600)
         try:
             if os.path.exists("jumble_game.db"):
                 await app.send_document(
@@ -867,22 +870,20 @@ async def auto_backup_task():
 async def start_cmd(_, message: Message):
     ensure_user(message.from_user)
     text = (
-        "<blockquote>🧩 <b>𝐖ᴇʟᴄᴏᴍᴇ 𝐓ᴏ 𝐀ᴅᴠᴀɴᴄᴇᴅ 𝐉ᴜᴍʙʟᴇ 𝐁ᴏᴛ!</b></blockquote>\n\n"
-        "<blockquote>🎮 <b>𝐆ᴀᴍᴇ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
+        "<blockquote>🧩 <b>𝐖ᴇʟᴄᴏᴍᴇ 𝐓ᴏ 𝐀ᴅᴠᴀɴᴄᴇᴅ 𝐉ᴜᴍʙʟᴇ 𝐁ᴏᴛ!</b>\n\n"
+        "🎮 <b>𝐆ᴀᴍᴇ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
         "• <code>/jumble</code> — 𝐒ᴛᴀʀᴛ 𝐀ᴜᴛᴏ-ʟᴏᴏᴘ 𝐉ᴜᴍʙʟᴇ 𝐆ᴀᴍᴇ\n"
-        "• <code>/jumblefight @user</code> — 1v1 𝐁ᴀᴛᴛʟᴇ 𝐌ᴏᴅᴇ (ᴡɪᴛʜ 𝐀ᴄᴄᴇᴘᴛ 𝐆ᴀᴛᴇ)\n"
+        "• <code>/jumblefight @user</code> — 1v1 𝐁ᴀᴛᴛʟᴇ 𝐌ᴏᴅᴇ\n"
         "• <code>/jumblebetfight [mode] [amount] @user</code> — 1v1 𝐁ᴇᴛ 𝐁ᴀᴛᴛʟᴇ\n"
-        "• <code>/settings</code> — 𝐀ᴅᴍɪɴ 𝐏ᴀɴᴇʟ (𝐒ᴛᴀʀᴛ/𝐒ᴛᴏᴘ, 𝐌ᴏᴅᴇ, 𝐀ᴜᴛᴏ-ᴅᴇʟᴇᴛᴇ)</blockquote>\n\n"
-        "<blockquote>🎁 <b>𝐅ʀᴇᴇ 𝐏ᴏɪɴᴛs & 𝐑ᴇᴡᴀʀᴅs:</b>\n"
-        "• <code>/daily</code> — 𝐂ʟᴀɪᴍ 𝐃ᴀɪʟʏ 𝐁ᴏɴᴜs 𝐏ᴏɪɴᴛs ɪɴ 𝐃ᴍ (ᴇᴠᴇʀʏ 24ʜ)\n"
-        "• <code>/bonus</code> — 𝐂ʟᴀɪᴍ 𝐆ʀᴏᴜᴘ 𝐀ᴅᴅɪᴛɪᴏɴ 𝐁ᴏɴᴜs (ᴡʜᴇɴ 𝐁ᴏᴛ ɪs 𝐀ᴅᴅᴇᴅ ᴀs 𝐀ᴅᴍɪɴ)</blockquote>\n\n"
-        "<blockquote>🛡️ <b>𝐏ʀɪᴠᴀᴄʏ 𝐒ᴇᴛᴛɪɴɢs:</b>\n"
-        "• <code>/private</code> — 𝐇ɪᴅᴇ 𝐈𝐃/𝐓ᴀɢ ᴏɴ 𝐋ᴇᴀᴅᴇʀʙᴏᴀʀᴅ (𝐍ᴀᴍᴇ ᴏɴʟʏ)\n"
-        "• <code>/public</code> — 𝐒ʜᴏᴡ 𝐓ᴀɢ & 𝐈𝐃 ᴏɴ 𝐋ᴇᴀᴅᴇʀʙᴏᴀʀᴅ</blockquote>\n\n"
-        "<blockquote>📊 <b>𝐒ᴛᴀᴛs & 𝐑ᴀɴᴋɪɴɢs:</b>\n"
-        "• <code>/stats</code> — 𝐘ᴏᴜʀ 𝐏ᴇʀғᴏʀᴍᴀɴᴄᴇ\n"
-        "• <code>/leaderboard</code> — 𝐃ᴀɪʟʏ, 𝐖ᴇᴇᴋʟʏ, 𝐌ᴏɴᴛʜʟʏ & 𝐆ʟᴏʙᴀʟ 𝐑ᴀɴᴋs\n"
-        "• <code>/help</code> — 𝐅ᴜʟʟ 𝐁ᴏᴛ 𝐆ᴜɪᴅᴇ</blockquote>"
+        "• <code>/settings</code> — 𝐀ᴅᴍɪɴ 𝐏ᴀɴᴇʟ\n\n"
+        "🎁 <b>𝐅ʀᴇᴇ 𝐏ᴏɪɴᴛs & 𝐑ᴇᴡᴀʀᴅs:</b>\n"
+        "• <code>/daily</code> — 𝐂ʟᴀɪᴍ 𝐃ᴀɪʟʏ 𝐁ᴏɴᴜs ɪɴ 𝐃𝐌\n"
+        "• <code>/bonus</code> — 𝐂ʟᴀɪᴍ 𝐆ʀᴏᴜᴘ 𝐀ᴅᴍɪɴ 𝐁ᴏɴᴜs\n\n"
+        "🛡️ <b>𝐏ʀɪᴠᴀᴄʏ & 𝐒ᴛᴀᴛs:</b>\n"
+        "• <code>/private</code> / <code>/public</code> — 𝐋ᴇᴀᴅᴇʀʙᴏᴀʀᴅ 𝐏ʀɪᴠᴀᴄʏ\n"
+        "• <code>/stats</code> — 𝐘ᴏᴜʀ 𝐒ᴄᴏʀᴇ\n"
+        "• <code>/leaderboard</code> — 𝐓ᴏᴘ 𝐑ᴀɴᴋɪɴɢs\n"
+        "• <code>/help</code> — 𝐅ᴜʟʟ 𝐆ᴜɪᴅᴇ</blockquote>"
     )
 
     dm_markup = InlineKeyboardMarkup([
@@ -911,36 +912,36 @@ async def help_cmd(_, message: Message):
         "• <code>/jumble</code> — 𝐒ᴛᴀʀᴛ ᴀᴜᴛᴏ-ʟᴏᴏᴘɪɴɢ ᴊᴜᴍʙʟᴇ ɢᴀᴍᴇ\n"
         "• <code>/jumblefight @user</code> — 1v1 ʙᴀᴛᴛʟᴇ ᴍᴀᴛᴄʜ\n"
         "• <code>/jumblebetfight [mode] [amount] @user</code> — 1v1 ʙᴇᴛ ᴍᴀᴛᴄʜ\n"
-        "• <code>/settings</code> — 𝐀ᴅᴍɪɴ sᴛᴀʀᴛ/sᴛᴏᴘ & ɢᴀᴍᴇ sᴇᴛᴛɪɴɢs\n"
-        "• <code>/daily</code> — 𝐂ʟᴀɪᴍ ᴅᴀɪʟʏ ᴘᴏɪɴᴛs (𝐃𝐌 ᴏɴʟʏ)\n"
-        "• <code>/bonus</code> — 𝐂ʟᴀɪᴍ ɢʀᴏᴜᴘ ᴀᴅᴍɪɴ ʀᴇᴡᴀʀᴅ (𝐆ʀᴏᴜᴘ ᴏɴʟʏ)\n"
+        "• <code>/settings</code> — 𝐀ᴅᴍɪɴ sᴛᴀʀᴛ/sᴛᴏᴘ & sᴇᴛᴛɪɴɢs\n"
+        "• <code>/daily</code> — 𝐂ʟᴀɪᴍ ᴅᴀɪʟʏ ᴘᴏɪɴᴛs (𝐃𝐌)\n"
+        "• <code>/bonus</code> — 𝐂ʟᴀɪᴍ ɢʀᴏᴜᴘ ʀᴇᴡᴀʀᴅ\n"
         "• <code>/leaderboard</code> — 𝐓ᴏᴘ ᴘʟᴀʏᴇʀs ʀᴀɴᴋɪɴɢ\n"
         "• <code>/stats</code> — 𝐏ᴇʀsᴏɴᴀʟ sᴄᴏʀᴇ ᴄᴀʀᴅ\n"
-        "• <code>/private</code> — 𝐇ɪᴅᴇ ᴛᴀɢ & 𝐈𝐃 ғʀᴏᴍ ʟᴇᴀᴅᴇʀʙᴏᴀʀᴅ\n"
-        "• <code>/public</code> — 𝐒ʜᴏᴡ ᴛᴀɢ & 𝐈𝐃 ᴏɴ ʟᴇᴀᴅᴇʀʙᴏᴀʀᴅ</blockquote>"
+        "• <code>/private</code> — 𝐇ɪᴅᴇ ᴛᴀɢ & 𝐈𝐃\n"
+        "• <code>/public</code> — 𝐒ʜᴏᴡ ᴛᴀɢ & 𝐈𝐃</blockquote>"
     )
     if is_user_auth:
         text += (
-            "\n\n<blockquote>🔐 <b>𝐀ᴜᴛʜ / 𝐖ᴏʀᴅ 𝐁ᴀɴᴋ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
-            "• <code>/word</code> — 𝐕ɪᴇᴡ ᴄᴀᴛᴇɢᴏʀɪᴢᴇᴅ ᴡᴏʀᴅ ʙᴀɴᴋ\n"
-            "• <code>/addword easy cat dog bird</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ ᴡᴏʀᴅs\n"
-            "• <code>/delword easy word</code> — 𝐃ᴇʟᴇᴛᴇ ᴡᴏʀᴅ ғʀᴏᴍ ʙᴀɴᴋ\n"
-            "• <code>/delallword easy</code> — <b>𝐃ᴇʟᴇᴛᴇ ᴀʟʟ ᴡᴏʀᴅs ᴏғ ᴀ ᴍᴏᴅᴇ</b>\n"
-            "• <code>/setpoints [easy|med|hard] [pts]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ᴘᴏɪɴᴛs\n"
-            "• <code>/sethint [easy|med|hard] [hints]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ʜɪɴᴛs\n"
-            "• <code>/setdaily [points]</code> — 𝐒ᴇᴛ ᴅᴀɪʟʏ ᴄʟᴀɪᴍ ʀᴇᴡᴀʀᴅ\n"
-            "• <code>/setbonus [points]</code> — 𝐒ᴇᴛ ɢʀᴏᴜᴘ ʙᴏɴᴜs ʀᴇᴡᴀʀᴅ\n"
-            "• <code>/addstar [user] [points]</code> — <b>Add Points/Stars</b>\n"
-            "• <code>/deductstar [user] [points]</code> — <b>Deduct Points/Stars</b>\n"
-            "• <code>/update</code> — 𝐆ɪᴛ sᴛᴀsʜ, ᴘᴜʟʟ & 𝐀ᴜᴛᴏ-ʀᴇsᴜᴍᴇ</blockquote>"
+            "\n\n<blockquote>🔐 <b>𝐀ᴜᴛʜ / 𝐖ᴏʀᴅ 𝐁ᴀɴᴋ:</b>\n"
+            "• <code>/word</code> — 𝐂ᴀᴛᴇɢᴏʀɪᴢᴇᴅ ᴡᴏʀᴅ ʙᴀɴᴋ\n"
+            "• <code>/addword easy cat dog bird</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ\n"
+            "• <code>/delword easy word</code> — 𝐃ᴇʟᴇᴛᴇ ᴡᴏʀᴅ\n"
+            "• <code>/delallword easy</code> — 𝐂ʟᴇᴀʀ ᴀʟʟ ᴡᴏʀᴅs\n"
+            "• <code>/setpoints [diff] [pts]</code> — 𝐒ᴇᴛ ᴘᴏɪɴᴛs\n"
+            "• <code>/sethint [diff] [hints]</code> — 𝐒ᴇᴛ ʜɪɴᴛs\n"
+            "• <code>/setdaily [pts]</code> — 𝐒ᴇᴛ ᴅᴀɪʟʏ ʀᴇᴡᴀʀᴅ\n"
+            "• <code>/setbonus [pts]</code> — 𝐒ᴇᴛ ɢʀᴏᴜᴘ ʙᴏɴᴜs\n"
+            "• <code>/addstar [user] [pts]</code> — 𝐀ᴅᴅ ᴘᴏɪɴᴛs\n"
+            "• <code>/deductstar [user] [pts]</code> — 𝐃ᴇᴅᴜᴄᴛ ᴘᴏɪɴᴛs\n"
+            "• <code>/update</code> — 𝐆ɪᴛ ᴘᴜʟʟ & ʀᴇsᴛᴀʀᴛ</blockquote>"
         )
     if message.from_user and is_owner(message.from_user.id):
         text += (
             "\n\n<blockquote>👑 <b>𝐎ᴡɴᴇʀ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
-            "• <code>/auth @user</code> — 𝐆ʀᴀɴᴛ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
-            "• <code>/unauth @user</code> — 𝐑ᴇᴠᴏᴋᴇ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
-            "• <code>/authlist</code> — 𝐋ɪsᴛ ᴏғ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴜsᴇʀs\n"
-            "• <code>/backup</code> — 𝐃ᴏᴡɴʟᴏᴀᴅ 𝐋ᴀᴛᴇsᴛ 𝐃ᴀᴛᴀʙᴀsᴇ (.db)</blockquote>"
+            "• <code>/auth @user</code> — 𝐆ʀᴀɴᴛ ᴀᴜᴛʜ\n"
+            "• <code>/unauth @user</code> — 𝐑ᴇᴠᴏᴋᴇ ᴀᴜᴛʜ\n"
+            "• <code>/authlist</code> — 𝐀ᴜᴛʜ ᴜsᴇʀs ʟɪsᴛ\n"
+            "• <code>/backup</code> — 𝐃ᴏᴡɴʟᴏᴀᴅ .db</blockquote>"
         )
     await message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -1126,7 +1127,7 @@ async def settings_cmd(_, message: Message):
         ]
     ])
     await message.reply_text(
-        f"<blockquote>⚙️ <b>𝐉ᴜᴍʙʟᴇ 𝐆ʀᴏᴜᴘ 𝐒ᴇᴛᴛɪɴgs</b>\n\n"
+        f"<blockquote>⚙️ <b>𝐉ᴜᴍʙʟᴇ 𝐆ʀᴏᴜᴘ 𝐒ᴇᴛᴛɪɴɢs</b>\n\n"
         f"🟢 <b>𝐆ᴀᴍᴇ 𝐒ᴛᴀᴛᴜs:</b> <code>{'Running' if s['is_active'] else 'Stopped'}</code>\n"
         f"🗑️ <b>𝐀ᴜᴛᴏ 𝐃ᴇʟᴇᴛᴇ 𝐎ʟᴅ:</b> <code>{'Enabled' if s['auto_delete'] else 'Disabled'}</code>\n"
         f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
@@ -1152,33 +1153,31 @@ async def set_points_global(_, message: Message):
         try:
             pts = int(args[0])
         except ValueError:
-            return await message.reply_text("❌ Invalid points number.")
+            return await message.reply_text("<blockquote>❌ Invalid points number.</blockquote>", parse_mode=ParseMode.HTML)
 
         set_global_config("points_easy", pts)
         set_global_config("points_medium", pts)
         set_global_config("points_hard", pts)
-        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye Easy, Medium, aur Hard reward <b>{pts} points</b> set kar diya gaya.</blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nEasy, Medium, Hard reward <b>{pts} points</b> set kar diya gaya.</blockquote>", parse_mode=ParseMode.HTML)
 
     elif len(args) == 2:
         category = args[0].lower()
         if category not in ("easy", "medium", "hard"):
-            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
+            return await message.reply_text("<blockquote>❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.</blockquote>", parse_mode=ParseMode.HTML)
 
         try:
             pts = int(args[1])
         except ValueError:
-            return await message.reply_text("❌ Invalid points number.")
+            return await message.reply_text("<blockquote>❌ Invalid points number.</blockquote>", parse_mode=ParseMode.HTML)
 
         set_global_config(f"points_{category}", pts)
-        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye <b>{category.title()}</b> reward <b>{pts} points</b> set kar diya gaya.</blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\n<b>{category.title()}</b> reward <b>{pts} points</b> set kar diya gaya.</blockquote>", parse_mode=ParseMode.HTML)
 
     else:
         return await message.reply_text(
             "<blockquote><b>Global Usage:</b>\n"
-            "• <code>/setpoints 20</code> — Sabhi categories ke liye globally\n"
-            "• <code>/setpoints easy 10</code> — Sirf Easy ke liye globally\n"
-            "• <code>/setpoints medium 25</code> — Sirf Medium ke liye globally\n"
-            "• <code>/setpoints hard 50</code> — Sirf Hard ke liye globally</blockquote>",
+            "• <code>/setpoints 20</code> — Sabhi categories ke liye\n"
+            "• <code>/setpoints easy 10</code> — Sirf Easy ke liye</blockquote>",
             parse_mode=ParseMode.HTML
         )
 
@@ -1193,33 +1192,31 @@ async def sethint_global(_, message: Message):
         try:
             h = int(args[0])
         except ValueError:
-            return await message.reply_text("❌ Invalid hint number.")
+            return await message.reply_text("<blockquote>❌ Invalid hint number.</blockquote>", parse_mode=ParseMode.HTML)
 
         set_global_config("hints_easy", h)
         set_global_config("hints_medium", h)
         set_global_config("hints_hard", h)
-        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye hints limit <b>{h} hints/round</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nHints limit <b>{h} hints/round</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
 
     elif len(args) == 2:
         category = args[0].lower()
         if category not in ("easy", "medium", "hard"):
-            return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
+            return await message.reply_text("<blockquote>❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.</blockquote>", parse_mode=ParseMode.HTML)
 
         try:
             h = int(args[1])
         except ValueError:
-            return await message.reply_text("❌ Invalid hint number.")
+            return await message.reply_text("<blockquote>❌ Invalid hint number.</blockquote>", parse_mode=ParseMode.HTML)
 
         set_global_config(f"hints_{category}", h)
-        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\nSabhi groups aur chats ke liye <b>{category.title()}</b> hints limit <b>{h} hints/round</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>🌍 <b>𝐆𝐋𝐎𝐁𝐀𝐋 𝐒𝐄𝐓𝐓𝐈𝐍𝐆 𝐔𝐏𝐃𝐀𝐓𝐄𝐃!</b>\n\n<b>{category.title()}</b> hints limit <b>{h} hints/round</b> set kar di gayi.</blockquote>", parse_mode=ParseMode.HTML)
 
     else:
         return await message.reply_text(
             "<blockquote><b>Global Usage:</b>\n"
-            "• <code>/sethint 3</code> — Sabhi categories ke liye globally\n"
-            "• <code>/sethint easy 5</code> — Sirf Easy ke liye globally\n"
-            "• <code>/sethint medium 3</code> — Sirf Medium ke liye globally\n"
-            "• <code>/sethint hard 2</code> — Sirf Hard ke liye globally</blockquote>",
+            "• <code>/sethint 3</code> — Sabhi categories ke liye\n"
+            "• <code>/sethint easy 5</code> — Sirf Easy ke liye</blockquote>",
             parse_mode=ParseMode.HTML
         )
 
@@ -1230,41 +1227,41 @@ async def sethint_global(_, message: Message):
 @app.on_message(filters.command("setdaily"))
 async def set_daily_cmd(_, message: Message):
     if not message.from_user or not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Sirf Owner aur Auth users daily reward set kar sakte hain.")
+        return await message.reply_text("<blockquote>❌ Sirf Owner aur Auth users daily reward set kar sakte hain.</blockquote>", parse_mode=ParseMode.HTML)
 
     if len(message.command) < 2:
-        return await message.reply_text("Usage: <code>/setdaily 100</code>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>Usage: <code>/setdaily 100</code></blockquote>", parse_mode=ParseMode.HTML)
 
     try:
         val = int(message.command[1])
     except ValueError:
-        return await message.reply_text("❌ Invalid number.")
+        return await message.reply_text("<blockquote>❌ Invalid number.</blockquote>", parse_mode=ParseMode.HTML)
 
     set_global_config("daily_points", val)
-    await message.reply_text(f"<blockquote>✅ <b>Daily claim reward <b>{val} points</b> set kar diya gaya.</b></blockquote>", parse_mode=ParseMode.HTML)
+    await message.reply_text(f"<blockquote>✅ <b>Daily claim reward {val} points set kar diya gaya.</b></blockquote>", parse_mode=ParseMode.HTML)
 
 @app.on_message(filters.command("setbonus"))
 async def set_bonus_cmd(_, message: Message):
     if not message.from_user or not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Sirf Owner aur Auth users group bonus reward set kar sakte hain.")
+        return await message.reply_text("<blockquote>❌ Sirf Owner aur Auth users group bonus reward set kar sakte hain.</blockquote>", parse_mode=ParseMode.HTML)
 
     if len(message.command) < 2:
-        return await message.reply_text("Usage: <code>/setbonus 200</code>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>Usage: <code>/setbonus 200</code></blockquote>", parse_mode=ParseMode.HTML)
 
     try:
         val = int(message.command[1])
     except ValueError:
-        return await message.reply_text("❌ Invalid number.")
+        return await message.reply_text("<blockquote>❌ Invalid number.</blockquote>", parse_mode=ParseMode.HTML)
 
     set_global_config("bonus_points", val)
-    await message.reply_text(f"<blockquote>✅ <b>Group admin bonus reward <b>{val} points</b> set kar diya gaya.</b></blockquote>", parse_mode=ParseMode.HTML)
+    await message.reply_text(f"<blockquote>✅ <b>Group admin bonus reward {val} points set kar diya gaya.</b></blockquote>", parse_mode=ParseMode.HTML)
 
 @app.on_message(filters.command("daily"))
 async def daily_cmd(_, message: Message):
     if not message.from_user:
         return
     if message.chat.type != ChatType.PRIVATE:
-        return await message.reply_text("<blockquote>❌ <b><code>/daily</code> command sirf bot ke DM (Private Chat) mein use kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b><code>/daily</code> command sirf bot ke DM mein use kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     ensure_user(message.from_user)
     u = get_user(message.from_user.id)
@@ -1279,21 +1276,13 @@ async def daily_cmd(_, message: Message):
         return await message.reply_text(f"<blockquote>⏳ <b>Aapne aaj ka daily reward claim kar liya hai!</b>\nNext claim available in: <b>{hrs}h {mins}m</b></blockquote>", parse_mode=ParseMode.HTML)
 
     reward = get_global_config("daily_points", 50)
-    DB.execute("""
-        UPDATE users 
-        SET points = points + ?, last_daily = ?
-        WHERE user_id = ?
-    """, (reward, now, message.from_user.id))
-
-    DB.execute("""
-        INSERT INTO score_history (user_id, chat_id, points, timestamp)
-        VALUES (?, 0, ?, ?)
-    """, (message.from_user.id, reward, now))
+    DB.execute("UPDATE users SET points = points + ?, last_daily = ? WHERE user_id = ?", (reward, now, message.from_user.id))
+    DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, 0, ?, ?)", (message.from_user.id, reward, now))
     DB.commit()
 
     await message.reply_text(
         f"<blockquote>🎁 <b>𝐃ᴀɪʟʏ 𝐑ᴇᴡᴀʀᴅ 𝐂ʟᴀɪᴍᴇᴅ!</b>\n\n"
-        f"⭐ <b>+{reward} Points</b> successfully aapke balance mein add kar diye gaye hain.\n"
+        f"⭐ <b>+{reward} Points</b> successfully add ho gaye hain.\n"
         f"Wapas 24 ghante baad claim karein!</blockquote>",
         parse_mode=ParseMode.HTML
     )
@@ -1303,7 +1292,7 @@ async def bonus_cmd(_, message: Message):
     if not message.from_user:
         return
     if not is_group(message):
-        return await message.reply_text("<blockquote>❌ <b><code>/bonus</code> command sirf group mein chal sakti hai jahan aapne bot ko add karke admin banaya hai.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b><code>/bonus</code> command sirf group mein chal sakti hai.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     ensure_user(message.from_user)
     chat_id = message.chat.id
@@ -1318,7 +1307,7 @@ async def bonus_cmd(_, message: Message):
         if getattr(bot_member, "promoted_by", None):
             promoted_by_user_id = bot_member.promoted_by.id
     except Exception:
-        return await message.reply_text("<blockquote>❌ <b>Bot ke admin permissions verify nahi ho sake. Kripya bot ko Admin banayein.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b>Bot ke permissions verify nahi ho sake. Kripya bot ko Admin banayein.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     claimed = DB.execute("SELECT * FROM group_bonus WHERE chat_id=?", (chat_id,)).fetchone()
     if claimed:
@@ -1342,33 +1331,26 @@ async def bonus_cmd(_, message: Message):
             pass
 
     if valid_claimant_id and user_id != valid_claimant_id and not is_owner(user_id):
-        return await message.reply_text("<blockquote>❌ <b>Yeh bonus sirf wahi user claim kar sakta hai jisne bot ko is group mein add ya admin banaya hai!</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b>Yeh bonus sirf wahi claim kar sakta hai jisne bot ko group me add ya admin banaya!</b></blockquote>", parse_mode=ParseMode.HTML)
 
     bonus_pts = get_global_config("bonus_points", 100)
     now = time.time()
 
-    DB.execute("""
-        INSERT INTO group_bonus (chat_id, user_id, claimed_at)
-        VALUES (?, ?, ?)
-    """, (chat_id, user_id, now))
-
+    DB.execute("INSERT INTO group_bonus (chat_id, user_id, claimed_at) VALUES (?, ?, ?)", (chat_id, user_id, now))
     DB.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (bonus_pts, user_id))
-    DB.execute("""
-        INSERT INTO score_history (user_id, chat_id, points, timestamp)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, chat_id, bonus_pts, now))
+    DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (user_id, chat_id, bonus_pts, now))
     DB.commit()
 
     mention = get_mention(message.from_user)
     await message.reply_text(
         f"<blockquote>🎉 <b>𝐆ʀᴏᴜᴘ 𝐁ᴏɴᴜs 𝐂ʟᴀɪᴍᴇᴅ!</b>\n\n"
         f"👤 {mention}\n"
-        f"⭐ <b>+{bonus_pts} Points</b> successfully aapke profile mein add ho gaye hain bot ko add karke admin banane ke reward ke roop mein!</blockquote>",
+        f"⭐ <b>+{bonus_pts} Points</b> successfully aapke account me add ho gaye hain!</blockquote>",
         parse_mode=ParseMode.HTML
     )
 
 # ============================================================
-# POINTS MANAGEMENT: ADDSTAR & DEDUCTSTAR (OWNER & AUTH ONLY)
+# POINTS MANAGEMENT: ADDSTAR & DEDUCTSTAR
 # ============================================================
 
 async def resolve_target_and_amount(message: Message):
@@ -1418,9 +1400,9 @@ async def addstar_cmd(_, message: Message):
     if not target or amount <= 0:
         return await message.reply_text(
             "<blockquote>⭐ <b>Usage:</b>\n\n"
-            "• Kisi ke message par reply karke: <code>/addstar 100</code>\n"
-            "• Username se: <code>/addstar @username 100</code>\n"
-            "• User ID se: <code>/addstar 123456789 100</code></blockquote>",
+            "• Reply: <code>/addstar 100</code>\n"
+            "• Username: <code>/addstar @username 100</code>\n"
+            "• ID: <code>/addstar 123456789 100</code></blockquote>",
             parse_mode=ParseMode.HTML
         )
 
@@ -1457,9 +1439,9 @@ async def deductstar_cmd(_, message: Message):
     if not target or amount <= 0:
         return await message.reply_text(
             "<blockquote>🛡️ <b>Usage:</b>\n\n"
-            "• Kisi ke message par reply karke: <code>/deductstar 50</code>\n"
-            "• Username se: <code>/deductstar @username 50</code>\n"
-            "• User ID se: <code>/deductstar 123456789 50</code></blockquote>",
+            "• Reply: <code>/deductstar 50</code>\n"
+            "• Username: <code>/deductstar @username 50</code>\n"
+            "• ID: <code>/deductstar 123456789 50</code></blockquote>",
             parse_mode=ParseMode.HTML
         )
 
@@ -1491,7 +1473,7 @@ async def deductstar_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 6))
 
 # ============================================================
-# PRIVACY SYSTEM (/private & /public)
+# PRIVACY SYSTEM
 # ============================================================
 
 @app.on_message(filters.command("private"))
@@ -1504,8 +1486,7 @@ async def private_cmd(_, message: Message):
 
     await message.reply_text(
         "<blockquote>🔒 <b>𝐏ʀɪᴠᴀᴄʏ 𝐄ɴᴀʙʟᴇᴅ!</b>\n\n"
-        "Leaderboard par aapka <b>Tag, Link aur User ID hide</b> kar diya gaya hai. Sirf aapka plain name dikhega.\n"
-        "Wapas tag show karne ke liye <code>/public</code> use karein.</blockquote>",
+        "Leaderboard par aapka Tag aur User ID hide ho chuka hai. Sirf plain name dikhega.</blockquote>",
         parse_mode=ParseMode.HTML
     )
 
@@ -1519,19 +1500,18 @@ async def public_cmd(_, message: Message):
 
     await message.reply_text(
         "<blockquote>🌐 <b>𝐏ᴜʙʟɪᴄ 𝐌ᴏᴅᴇ 𝐄ɴᴀʙʟᴇᴅ!</b>\n\n"
-        "Leaderboard par aapka <b>Username, Tag Link aur User ID</b> display hoga.\n"
-        "Hide karne ke liye <code>/private</code> use karein.</blockquote>",
+        "Leaderboard par aapka Username, Tag Link aur User ID show hoga.</blockquote>",
         parse_mode=ParseMode.HTML
     )
 
 # ============================================================
-# GIT UPDATER (AUTH / OWNER ONLY)
+# GIT UPDATER
 # ============================================================
 
 @app.on_message(filters.command(["update", "gitpull"]))
 async def update_bot_cmd(_, message: Message):
     if not message.from_user or not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Sirf Authorized users bot update kar sakte hain.")
+        return await message.reply_text("<blockquote>❌ Sirf Authorized users bot update kar sakte hain.</blockquote>", parse_mode=ParseMode.HTML)
 
     msg = await message.reply_text("<blockquote>🔄 <b>Pulling latest changes from GitHub...</b></blockquote>", parse_mode=ParseMode.HTML)
     try:
@@ -1539,20 +1519,20 @@ async def update_bot_cmd(_, message: Message):
         pull_res = subprocess.run(["git", "pull"], check=True, capture_output=True, text=True)
         out = pull_res.stdout or "Updated successfully."
 
-        await msg.edit_text(f"<blockquote>✅ <b>Git Pull Output:</b>\n<code>{out[:500]}</code>\n\n🚀 <b>Restarting & Auto-resuming all active group games...</b></blockquote>", parse_mode=ParseMode.HTML)
+        await msg.edit_text(f"<blockquote>✅ <b>Git Pull Output:</b>\n<code>{out[:500]}</code>\n\n🚀 <b>Restarting Bot...</b></blockquote>", parse_mode=ParseMode.HTML)
         await asyncio.sleep(1.5)
         os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
         await msg.edit_text(f"<blockquote>❌ <b>Update Failed:</b>\n<code>{str(e)}</code></blockquote>", parse_mode=ParseMode.HTML)
 
 # ============================================================
-# AUTH SYSTEM (AUTO-CLEANUP COMMANDS)
+# AUTH SYSTEM
 # ============================================================
 
 @app.on_message(filters.command("auth"))
 async def auth_cmd(_, message: Message):
     if not message.from_user or not is_owner(message.from_user.id):
-        return await message.reply_text("❌ Sirf Bot Owner auth de sakta hai.")
+        return await message.reply_text("<blockquote>❌ Sirf Bot Owner auth de sakta hai.</blockquote>", parse_mode=ParseMode.HTML)
 
     target = None
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -1562,19 +1542,17 @@ async def auth_cmd(_, message: Message):
             arg = message.command[1]
             target = await app.get_users(int(arg) if arg.isdigit() else arg)
         except Exception:
-            return await message.reply_text("❌ User nahi mila.")
+            return await message.reply_text("<blockquote>❌ User nahi mila.</blockquote>", parse_mode=ParseMode.HTML)
     else:
-        return await message.reply_text("Usage:\n<code>/auth @username</code> or Reply <code>/auth</code>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>Usage:\n<code>/auth @username</code> ya Reply karein.</blockquote>", parse_mode=ParseMode.HTML)
 
     if target.is_bot:
-        return await message.reply_text("❌ Bots ko auth nahi diya ja sakta.")
+        return await message.reply_text("<blockquote>❌ Bots ko auth nahi diya ja sakta.</blockquote>", parse_mode=ParseMode.HTML)
 
     DB.execute("""
         INSERT INTO auth_users(user_id, username, name, added_at)
         VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username=excluded.username,
-            name=excluded.name
+        ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, name=excluded.name
     """, (target.id, target.username or "", target.first_name or "User", time.time()))
     DB.commit()
 
@@ -1586,7 +1564,7 @@ async def auth_cmd(_, message: Message):
 @app.on_message(filters.command("unauth"))
 async def unauth_cmd(_, message: Message):
     if not message.from_user or not is_owner(message.from_user.id):
-        return await message.reply_text("❌ Sirf Bot Owner unauth kar sakta hai.")
+        return await message.reply_text("<blockquote>❌ Sirf Bot Owner unauth kar sakta hai.</blockquote>", parse_mode=ParseMode.HTML)
 
     target = None
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -1596,27 +1574,25 @@ async def unauth_cmd(_, message: Message):
             arg = message.command[1]
             target = await app.get_users(int(arg) if arg.isdigit() else arg)
         except Exception:
-            return await message.reply_text("❌ User nahi mila.")
+            return await message.reply_text("<blockquote>❌ User nahi mila.</blockquote>", parse_mode=ParseMode.HTML)
     else:
-        return await message.reply_text("Usage:\n<code>/unauth @username</code> or Reply <code>/unauth</code>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>Usage:\n<code>/unauth @username</code> ya Reply karein.</blockquote>", parse_mode=ParseMode.HTML)
 
     DB.execute("DELETE FROM auth_users WHERE user_id=?", (target.id,))
     DB.commit()
 
     mention = get_mention(target)
-    res = await message.reply_text(f"<blockquote>🚫 {mention} (<code>{target.id}</code>) ka auth access remove kar diya gaya.</blockquote>", parse_mode=ParseMode.HTML)
+    res = await message.reply_text(f"<blockquote>🚫 {mention} (<code>{target.id}</code>) ka auth remove ho gaya.</blockquote>", parse_mode=ParseMode.HTML)
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
 @app.on_message(filters.command("authlist"))
 async def authlist_cmd(_, message: Message):
     if not message.from_user or not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Sirf Owner aur Auth users authlist dekh sakte hain.")
+        return await message.reply_text("<blockquote>❌ Sirf Owner aur Auth users authlist dekh sakte hain.</blockquote>", parse_mode=ParseMode.HTML)
 
     rows = DB.execute("SELECT * FROM auth_users ORDER BY added_at DESC").fetchall()
-    text = "<blockquote>🔐 <b>𝐀𝐔𝐓𝐇𝐎𝐑𝐈𝐙𝐄𝐃 𝐔𝐒𝐄𝐑𝐒 𝐋𝐈𝐒𝐓</b>\n\n"
-    text += f"👑 <b>Owner:</b> <code>{OWNER_ID}</code>\n\n"
-
+    text = f"<blockquote>🔐 <b>𝐀𝐔𝐓𝐇𝐎𝐑𝐈𝐙𝐄𝐃 𝐔𝐒𝐄𝐑𝐒 𝐋𝐈𝐒𝐓</b>\n\n👑 <b>Owner:</b> <code>{OWNER_ID}</code>\n\n"
     if not rows:
         text += "Koi extra authorized user nahi hai."
     else:
@@ -1630,7 +1606,7 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# BULK / DIRECT WORD BANK ADDITION
+# WORD BANK MANAGEMENT
 # ============================================================
 
 def process_bulk_words_addition(difficulty: str, raw_text: str):
@@ -1670,19 +1646,15 @@ async def addword_cmd(_, message: Message):
                 InlineKeyboardButton(f"🟡 𝐌ᴇᴅɪᴜᴍ ({len(WORDS['medium'])})", callback_data="wb_medium_1"),
                 InlineKeyboardButton(f"🔴 𝐇ᴀʀᴅ ({len(WORDS['hard'])})", callback_data="wb_hard_1")
             ],
-            [
-                InlineKeyboardButton("❌ 𝐂ʟᴏsᴇ", callback_data="close_panel")
-            ]
+            [InlineKeyboardButton("❌ 𝐂ʟᴏsᴇ", callback_data="close_panel")]
         ])
 
         await message.reply_text(
             "<blockquote>📚 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐖𝐎𝐑𝐃 𝐁𝐀𝐍𝐊</b>\n\n"
-            f"🟢 <b>𝐄ᴀsʏ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['easy'])}</code>\n"
-            f"🟡 <b>𝐌ᴇᴅɪᴜᴍ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['medium'])}</code>\n"
-            f"🔴 <b>𝐇ᴀʀᴅ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['hard'])}</code>\n\n"
-            "📌 <b>𝐁ᴜʟᴋ 𝐖ᴏʀᴅs 𝐀ᴅᴅ:</b>\n"
-            "<code>/addword easy cat dog bird tree lion</code>\n\n"
-            "Neeche buttons par click karke category ke words check karein (Single-tap copy):</blockquote>",
+            f"🟢 <b>𝐄ᴀsʏ:</b> <code>{len(WORDS['easy'])}</code> | "
+            f"🟡 <b>𝐌ᴇᴅɪᴜᴍ:</b> <code>{len(WORDS['medium'])}</code> | "
+            f"🔴 <b>𝐇ᴀʀᴅ:</b> <code>{len(WORDS['hard'])}</code>\n\n"
+            "📌 <b>Add Words:</b> <code>/addword easy cat dog bird</code></blockquote>",
             reply_markup=kb,
             parse_mode=ParseMode.HTML
         )
@@ -1692,11 +1664,7 @@ async def addword_cmd(_, message: Message):
     difficulty = parts[1].lower().strip() if len(parts) > 1 else ""
     if difficulty not in ("easy", "medium", "hard"):
         return await message.reply_text(
-            "<blockquote>❌ <b>Category must be:</b> <code>easy</code>, <code>medium</code>, ya <code>hard</code>.\n\n"
-            "<b>Usage:</b>\n"
-            "• <code>/addword easy apple banana mango</code>\n"
-            "• <code>/word medium computer database server</code>\n"
-            "• Ya kisi word list par reply karke likho: <code>/addword easy</code></blockquote>",
+            "<blockquote>❌ <b>Category must be:</b> <code>easy</code>, <code>medium</code>, ya <code>hard</code>.</blockquote>",
             parse_mode=ParseMode.HTML
         )
 
@@ -1707,21 +1675,16 @@ async def addword_cmd(_, message: Message):
         raw_payload = message.reply_to_message.text or message.reply_to_message.caption
 
     if not raw_payload.strip():
-        return await message.reply_text(
-            "<blockquote>❌ <b>Koi words provide nahi kiye gaye!</b>\n\n"
-            "Command ke sath words likhein ya kisi text message par reply karein:\n"
-            "<code>/addword easy cat dog bird lion tiger</code></blockquote>",
-            parse_mode=ParseMode.HTML
-        )
+        return await message.reply_text("<blockquote>❌ Koi words provide nahi kiye gaye!</blockquote>", parse_mode=ParseMode.HTML)
 
     added, skipped = process_bulk_words_addition(difficulty, raw_payload)
 
     if not added and not skipped:
-        return await message.reply_text("<blockquote>❌ <b>Koi valid word (kam se kam 3 alphabets) nahi mila.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ Koi valid word (min 3 alphabets) nahi mila.</blockquote>", parse_mode=ParseMode.HTML)
 
-    msg_text = f"<blockquote>✅ <b>{len(added)}</b> word(s) successfully added to <b>{difficulty.upper()}</b> bank!"
+    msg_text = f"<blockquote>✅ <b>{len(added)}</b> words added to <b>{difficulty.upper()}</b> bank!"
     if skipped:
-        msg_text += f"\n⚠️ <i>{len(skipped)} word(s) already exist karte the (Skipped).</i>"
+        msg_text += f"\n⚠️ <i>{len(skipped)} words already exist karte the.</i>"
     msg_text += "</blockquote>"
 
     res = await message.reply_text(msg_text, parse_mode=ParseMode.HTML)
@@ -1731,19 +1694,19 @@ async def addword_cmd(_, message: Message):
 @app.on_message(filters.command("delword"))
 async def delword_cmd(_, message: Message):
     if not message.from_user or not is_authed(message.from_user.id):
-        return await message.reply_text("❌ Aap authorized nahi hain.")
+        return await message.reply_text("<blockquote>❌ Aap authorized nahi hain.</blockquote>", parse_mode=ParseMode.HTML)
 
     if len(message.command) < 3:
-        return await message.reply_text("Usage:\n<code>/delword easy apple</code>\n<code>/delword medium computer</code>\n<code>/delword hard international</code>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>Usage: <code>/delword easy apple</code></blockquote>", parse_mode=ParseMode.HTML)
 
     difficulty = message.command[1].lower().strip()
     word_to_del = clean_answer(message.command[2])
 
     if difficulty not in WORDS:
-        return await message.reply_text("❌ Valid difficulties: <code>easy</code>, <code>medium</code>, <code>hard</code>.", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ Valid categories: <code>easy</code>, <code>medium</code>, <code>hard</code>.</blockquote>", parse_mode=ParseMode.HTML)
 
     if word_to_del not in WORDS[difficulty]:
-        res = await message.reply_text(f"<blockquote>❌ Word <b>'{word_to_del.upper()}'</b> {difficulty.upper()} bank mein nahi mila.</blockquote>", parse_mode=ParseMode.HTML)
+        res = await message.reply_text(f"<blockquote>❌ Word <b>'{word_to_del.upper()}'</b> {difficulty.upper()} bank me nahi mila.</blockquote>", parse_mode=ParseMode.HTML)
         asyncio.create_task(delete_after(message, 5))
         asyncio.create_task(delete_after(res, 5))
         return
@@ -1753,61 +1716,48 @@ async def delword_cmd(_, message: Message):
     DB.execute("DELETE FROM used_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
     DB.commit()
 
-    res = await message.reply_text(f"<blockquote>🗑️ Word <b>'{word_to_del.upper()}'</b> deleted from <b>{difficulty.upper()}</b> bank!</blockquote>", parse_mode=ParseMode.HTML)
+    res = await message.reply_text(f"<blockquote>🗑️ Word <b>'{word_to_del.upper()}'</b> deleted from {difficulty.upper()}!</blockquote>", parse_mode=ParseMode.HTML)
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
 @app.on_message(filters.command(["delallword", "delallwords", "clearword", "clearwords"]))
 async def del_all_words_cmd(_, message: Message):
     if not message.from_user or not is_authed(message.from_user.id):
-        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Auth users hi words clear kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ Sirf Owner aur Auth users words clear kar sakte hain.</blockquote>", parse_mode=ParseMode.HTML)
 
     if len(message.command) < 2:
-        return await message.reply_text(
-            "<blockquote><b>Usage:</b>\n"
-            "• <code>/delallword easy</code> — Easy mode ke saare words delete karein\n"
-            "• <code>/delallword medium</code> — Medium mode ke saare words delete karein\n"
-            "• <code>/delallword hard</code> — Hard mode ke saare words delete karein</blockquote>",
-            parse_mode=ParseMode.HTML
-        )
+        return await message.reply_text("<blockquote>Usage: <code>/delallword easy</code></blockquote>", parse_mode=ParseMode.HTML)
 
     diff = message.command[1].lower().strip()
     if diff not in WORDS:
-        return await message.reply_text("<blockquote>❌ <b>Category must be:</b> <code>easy</code>, <code>medium</code>, ya <code>hard</code>.</blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.</blockquote>", parse_mode=ParseMode.HTML)
 
     count = len(WORDS[diff])
     WORDS[diff] = []
-
     DB.execute("DELETE FROM custom_words WHERE difficulty=?", (diff,))
     DB.execute("DELETE FROM used_words WHERE difficulty=?", (diff,))
     DB.commit()
 
-    res = await message.reply_text(
-        f"<blockquote>🗑️ <b>{diff.upper()} 𝐌𝐎𝐃𝐄 𝐂𝐋𝐄𝐀𝐑𝐄𝐃!</b>\n\n"
-        f"Is category ke total <b>{count} words</b> successfully database aur memory se delete kar diye gaye hain.</blockquote>",
-        parse_mode=ParseMode.HTML
-    )
+    res = await message.reply_text(f"<blockquote>🗑️ <b>{diff.upper()}</b> mode ke <b>{count} words</b> clear ho gaye!</blockquote>", parse_mode=ParseMode.HTML)
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
 # ============================================================
-# JUMBLE COMMAND (LOOP PUZZLE LAUNCHER & AUTO-ENABLER)
+# JUMBLE & JUMBLE FIGHT LAUNCHERS
 # ============================================================
 
 @app.on_message(filters.command("jumble"))
 async def jumble_cmd(_, message: Message):
     ensure_user(message.from_user)
     if message.chat.id in JUMBLE_FIGHT:
-        return await message.reply_text("<blockquote>⚔️ <b>Jumble Fight chal rahi hai, match khatam hone tak wait karein.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>⚔️ <b>Jumble Fight chal rahi hai, match ke baad try karein.</b></blockquote>", parse_mode=ParseMode.HTML)
 
-    # Automatically enable the bot in group settings if disabled
     DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
     DB.commit()
 
     s = get_settings(message.chat.id)
     default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
 
-    # One-time override: User command sets mode for this puzzle only; next ones strictly follow group default
     if len(message.command) > 1:
         req_diff = message.command[1].lower().strip()
         difficulty = req_diff if req_diff in WORDS else default_d
@@ -1816,14 +1766,10 @@ async def jumble_cmd(_, message: Message):
 
     await start_game(message.chat.id, difficulty, message)
 
-# ============================================================
-# JUMBLE FIGHT (1v1 CHALLENGE COMMAND)
-# ============================================================
-
 @app.on_message(filters.command(["jumblefight", "fight", "rapido"]))
 async def jumble_fight_cmd(_, message: Message):
     if not is_group(message):
-        return await message.reply_text("<blockquote>❌ <b>Jumble Fight sirf groups mein chal sakta hai.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b>Jumble Fight sirf groups mein chal sakti hai.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     target_user = None
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -1836,7 +1782,7 @@ async def jumble_fight_cmd(_, message: Message):
             else:
                 target_user = await app.get_users(arg)
         except Exception:
-            return await message.reply_text("❌ User nahi mila.")
+            return await message.reply_text("<blockquote>❌ User nahi mila.</blockquote>", parse_mode=ParseMode.HTML)
     elif message.entities:
         for entity in message.entities:
             if entity.type.name == "TEXT_MENTION" and entity.user:
@@ -1846,14 +1792,13 @@ async def jumble_fight_cmd(_, message: Message):
     if not target_user:
         return await message.reply_text(
             "<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1:</b>\n\n"
-            "Kisi player ko challenge karne ke liye uske message par reply karke <code>/jumblefight</code> likho ya mention karo:\n"
             "• <code>/jumblefight @username</code>\n"
-            "• <code>/jumblefight UserID</code></blockquote>",
+            "• Ya kisi player ke message par reply karke likhein.</blockquote>",
             parse_mode=ParseMode.HTML
         )
 
     if message.from_user and target_user.id == message.from_user.id:
-        return await message.reply_text("<blockquote>❌ <b>Khud ke sath fight nahi kar sakte.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>❌ <b>Khud ke sath match nahi kar sakte.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     if target_user.is_bot:
         return await message.reply_text("<blockquote>❌ <b>Bots ke sath match nahi ho sakta.</b></blockquote>", parse_mode=ParseMode.HTML)
@@ -1863,18 +1808,16 @@ async def jumble_fight_cmd(_, message: Message):
 
     key = message.chat.id
     if key in JUMBLE_FIGHT:
-        return await message.reply_text("<blockquote>⚔️ <b>Is group mein already Jumble Fight chal rahi hai.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>⚔️ <b>Group me already fight chal rahi hai.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     m1 = get_mention(message.from_user) if message.from_user else "Player 1"
     m2 = get_mention(target_user)
-
     p1_id = message.from_user.id if message.from_user else 0
-    p1_name = message.from_user.first_name if message.from_user else "Player 1"
 
     FIGHT_LOBBY[key] = {
         "p1": p1_id,
         "p2": target_user.id,
-        "p1_name": p1_name,
+        "p1_name": message.from_user.first_name if message.from_user else "Player 1",
         "p2_name": target_user.first_name,
         "m1": m1,
         "m2": m2,
@@ -1902,18 +1845,14 @@ async def jumble_fight_cmd(_, message: Message):
     ])
 
     await message.reply_text(
-        f"<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀ʟʟᴇɴɢᴇ!</b>\n\n"
-        f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ:</b> {m1} (<code>{p1_id}</code>)\n"
-        f"🎯 <b>𝐓ᴀʀɢᴇᴛ:</b> {m2} (<code>{target_user.id}</code>)\n\n"
-        f"⚙️ <b>𝐒ᴇᴛᴛɪɴɢs:</b> Mode: <code>Medium</code> | Timer: <code>60s</code>\n\n"
+        f"<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀𝐋ʟᴇɴɢᴇ!</b>\n\n"
+        f"👤 <b>Challenger:</b> {m1} (<code>{p1_id}</code>)\n"
+        f"🎯 <b>Target:</b> {m2} (<code>{target_user.id}</code>)\n\n"
+        f"⚙️ <b>Settings:</b> Medium | 60s\n\n"
         f"👉 {m2}, match shuru karne ke liye <b>Accept Challenge</b> par click karo!</blockquote>",
         reply_markup=kb,
         parse_mode=ParseMode.HTML
     )
-
-# ============================================================
-# JUMBLE BET FIGHT COMMAND
-# ============================================================
 
 @app.on_message(filters.command(["jumblebetfight", "betfight"]))
 async def jumble_bet_fight_cmd(_, message: Message):
@@ -1967,14 +1906,10 @@ async def jumble_bet_fight_cmd(_, message: Message):
 
     if not target_user or amount < 100:
         return await message.reply_text(
-            "<blockquote>💰 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓 𝐔𝐒𝐀𝐆𝐄:</b>\n\n"
+            "<blockquote>💰 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓:</b>\n\n"
             "• <code>/jumblebetfight easy 500 @username</code>\n"
-            "• <code>/jumblebetfight hard 1000 UserID</code>\n"
-            "• Kisi player ke message par reply karke: <code>/jumblebetfight medium 200</code>\n\n"
-            "📌 <b>Rules:</b>\n"
-            "- Minimum Bet: <b>100 points</b>\n"
-            "- 75% Winner Reward | 25% Loser Cashback\n"
-            "- Comeback rematch par 25%+25% pot aur 100 stars recovery!</blockquote>",
+            "• Reply: <code>/jumblebetfight medium 200</code>\n\n"
+            "Min Bet: <b>100 points</b> | 75% Win / 25% Cashback</blockquote>",
             parse_mode=ParseMode.HTML
         )
 
@@ -1988,15 +1923,15 @@ async def jumble_bet_fight_cmd(_, message: Message):
     u2 = get_user(target_user.id)
 
     if u1["points"] < amount:
-        return await message.reply_text(f"<blockquote>❌ <b>Aapke paas पर्याप्त points nahi hain!</b>\nAapka balance: <code>{u1['points']} pts</code> | Bet: <code>{amount} pts</code></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>❌ <b>Aapke paas balance nahi hai!</b>\nBalance: <code>{u1['points']} pts</code> | Bet: <code>{amount} pts</code></blockquote>", parse_mode=ParseMode.HTML)
 
     if u2["points"] < amount:
         m2_temp = get_mention(target_user)
-        return await message.reply_text(f"<blockquote>❌ {m2_temp} ke paas bet lagane ke liye poore points nahi hain!\nOpponent balance: <code>{u2['points']} pts</code> | Bet: <code>{amount} pts</code></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text(f"<blockquote>❌ {m2_temp} ke paas points nahi hain!\nOpponent balance: <code>{u2['points']} pts</code></blockquote>", parse_mode=ParseMode.HTML)
 
     key = message.chat.id
     if key in JUMBLE_FIGHT:
-        return await message.reply_text("<blockquote>⚔️ <b>Is group mein already match chal raha hai, khatam hone tak wait karein.</b></blockquote>", parse_mode=ParseMode.HTML)
+        return await message.reply_text("<blockquote>⚔️ <b>Group mein already match chal raha hai.</b></blockquote>", parse_mode=ParseMode.HTML)
 
     m1 = get_mention(message.from_user)
     m2 = get_mention(target_user)
@@ -2035,20 +1970,18 @@ async def jumble_bet_fight_cmd(_, message: Message):
 
     await message.reply_text(
         f"<blockquote>💰 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>\n\n"
-        f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ:</b> {m1} (<code>{message.from_user.id}</code>)\n"
-        f"🎯 <b>𝐓ᴀʀɢᴇᴛ:</b> {m2} (<code>{target_user.id}</code>)\n\n"
-        f"💵 <b>𝐁ᴇᴛ 𝐒ᴛᴀᴋᴇ:</b> <code>{amount} points each</code> (Pot: <code>{amount * 2} pts</code>)\n"
-        f"🏆 <b>75% 𝐖ɪɴɴᴇʀ 𝐏ᴀʏᴏᴜᴛ:</b> <code>{int(amount * 2 * 0.75)} pts</code>\n"
-        f"🛡️ <b>25% 𝐋ᴏsᴇʀ 𝐂ᴀsʜʙᴀᴄᴋ:</b> <code>{amount * 2 - int(amount * 2 * 0.75)} pts</code>\n"
-        f"⚙️ <b>𝐌ᴏᴅᴇ:</b> <code>{diff.title()}</code> | ⏱️ <b>𝐓ɪᴍᴇʀ:</b> <code>60s</code>\n\n"
-        f"👉 {m2}, match shuru karne ke liye <b>Accept Bet</b> par click karo!\n"
-        f"<i>(Points tab hi deduct honge jab target accept karega)</i></blockquote>",
+        f"👤 <b>Challenger:</b> {m1} (<code>{message.from_user.id}</code>)\n"
+        f"🎯 <b>Target:</b> {m2} (<code>{target_user.id}</code>)\n\n"
+        f"💵 <b>Bet Stake:</b> <code>{amount} points each</code> (Pot: <code>{amount * 2} pts</code>)\n"
+        f"🏆 <b>75% Winner:</b> <code>{int(amount * 2 * 0.75)} pts</code>\n"
+        f"🛡️ <b>25% Cashback:</b> <code>{amount * 2 - int(amount * 2 * 0.75)} pts</code>\n\n"
+        f"👉 {m2}, match shuru karne ke liye <b>Accept Bet</b> par click karo!</blockquote>",
         reply_markup=kb,
         parse_mode=ParseMode.HTML
     )
 
 # ============================================================
-# UNIFIED ANSWER HANDLER (CLEAN COMMAND FILTER)
+# UNIFIED ANSWER HANDLER
 # ============================================================
 
 ALL_BOT_COMMANDS = {
@@ -2066,7 +1999,7 @@ async def group_answer_handler(_, message: Message):
         return
 
     txt = message.text.strip()
-    if txt.startswith("/") or txt.startswith("!") or txt.startswith("."):
+    if txt.startswith(("/", "!", ".")):
         cmd_candidate = txt[1:].split()[0].split("@")[0].lower()
         if cmd_candidate in ALL_BOT_COMMANDS:
             return
@@ -2078,7 +2011,7 @@ async def group_answer_handler(_, message: Message):
     if not cleaned_input:
         return
 
-    # 1. Active Jumble Fight Check
+    # Fight Answer check
     if chat_id in JUMBLE_FIGHT:
         async with LOCK:
             game = JUMBLE_FIGHT.get(chat_id)
@@ -2094,7 +2027,6 @@ async def group_answer_handler(_, message: Message):
                         pass
 
                 game["scores"][user_id] += 1
-
                 s = get_settings(chat_id)
                 if s["auto_delete"] and game.get("msg_id"):
                     await safe_delete_and_unpin(chat_id, game["msg_id"])
@@ -2102,7 +2034,7 @@ async def group_answer_handler(_, message: Message):
                 u_mention = get_mention(message.from_user)
                 r_msg = await message.reply_text(
                     f"<blockquote>⚡ {u_mention} (<code>{user_id}</code>) <b>𝐖𝐎𝐍 𝐑𝐎𝐔𝐍𝐃 {game['round']}!</b>\n"
-                    f"🏆 <b>𝐑ᴏᴜɴᴅ 𝐒ᴄᴏʀᴇ:</b> <code>{game['scores'][user_id]}</code></blockquote>",
+                    f"🏆 <b>Score:</b> <code>{game['scores'][user_id]}</code></blockquote>",
                     parse_mode=ParseMode.HTML
                 )
                 if s["auto_delete"]:
@@ -2113,7 +2045,7 @@ async def group_answer_handler(_, message: Message):
                 return
         return
 
-    # 2. Normal Game Check
+    # Normal Puzzle Answer check
     game = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (chat_id,)).fetchone()
     if not game or time.time() > game["expires"]:
         return
@@ -2133,15 +2065,11 @@ async def group_answer_handler(_, message: Message):
         best = max(new_streak, u["best_streak"])
 
         DB.execute("""
-            UPDATE users
-            SET points=points+?, solved=solved+1, streak=?, best_streak=?
-            WHERE user_id=?
+            UPDATE users SET points=points+?, solved=solved+1, streak=?, best_streak=? WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
 
-        # Positive point entry into score history
         DB.execute("""
-            INSERT INTO score_history (user_id, chat_id, points, timestamp)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)
         """, (user_id, chat_id, pts_reward, time.time()))
         DB.commit()
 
@@ -2154,8 +2082,8 @@ async def group_answer_handler(_, message: Message):
             f"👤 {u_mention} (<code>{user_id}</code>)\n"
             f"✅ <b>𝐀ɴsᴡᴇʀ:</b> <code>{game['word'].upper()}</code>\n"
             f"⭐ <b>+{pts_reward} points</b>\n"
-            f"🔥 <b>𝐂ᴜʀʀᴇɴᴛ 𝐒ᴛʀᴇᴀᴋ:</b> <code>{new_streak}</code>\n\n"
-            f"🔄 <i>𝐍ᴇxᴛ ᴘᴜᴢᴢʟᴇ ᴄᴏᴍɪɴɢ ɪɴ 3 sᴇᴄᴏɴᴅs...</i></blockquote>",
+            f"🔥 <b>Streak:</b> <code>{new_streak}</code>\n\n"
+            f"🔄 <i>Next puzzle coming in 3 seconds...</i></blockquote>",
             parse_mode=ParseMode.HTML
         )
 
@@ -2189,7 +2117,6 @@ async def callback_router(_, query: CallbackQuery):
         difficulty = game["difficulty"]
 
         hint_limit = get_global_config(f"hints_{difficulty}", 3)
-
         hint_row = DB.execute("SELECT * FROM puzzle_hints WHERE chat_id=? AND puzzle_id=? AND user_id=?", (chat_id, puzzle_id, user_id)).fetchone()
         hints_used = hint_row["hints_used"] if hint_row else 0
         revealed_indices = [int(i) for i in hint_row["revealed_indices"].split(",") if i] if hint_row else []
@@ -2209,8 +2136,7 @@ async def callback_router(_, query: CallbackQuery):
             INSERT INTO puzzle_hints(chat_id, puzzle_id, user_id, hints_used, revealed_indices)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(chat_id, puzzle_id, user_id) DO UPDATE SET
-                hints_used=excluded.hints_used,
-                revealed_indices=excluded.revealed_indices
+                hints_used=excluded.hints_used, revealed_indices=excluded.revealed_indices
         """, (chat_id, puzzle_id, user_id, hints_used, ",".join(map(str, revealed_indices))))
         DB.commit()
 
@@ -2232,13 +2158,12 @@ async def callback_router(_, query: CallbackQuery):
         revealed = game["round_revealed"][user_id]
         avail = [i for i in range(len(word)) if i not in revealed]
         if not avail:
-            return await query.answer("❌ Is round ke saare letters reveal ho chuke hain.", show_alert=True)
+            return await query.answer("❌ Saare letters reveal ho chuke hain.", show_alert=True)
 
         idx = random.choice(avail)
         revealed.append(idx)
         game["hints_left"][user_id] -= 1
         rem = game["hints_left"][user_id]
-
         return await query.answer(f"💡 Hint: Letter #{idx + 1} is '{word[idx].upper()}'\nRound Hints Left: {rem}/{total_allowed}", show_alert=True)
 
     elif data.startswith("lb_"):
@@ -2246,7 +2171,6 @@ async def callback_router(_, query: CallbackQuery):
         parts = data.split("_")
         scope = parts[1]
         target_chat = int(parts[2])
-
         text, kb = build_leaderboard_text_and_kb(scope, target_chat)
         try:
             await query.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -2294,25 +2218,20 @@ async def callback_router(_, query: CallbackQuery):
 
         msg = (
             f"<blockquote>📚 <b>{diff.upper()} 𝐖𝐎𝐑𝐃𝐒 𝐁𝐀𝐍𝐊</b> (Total: <code>{total_words}</code>)\n"
-            f"📌 <i>Tip: Tap on any word below to copy it!</i>\n\n"
+            f"📌 <i>Tap to copy:</i>\n\n"
             f"{formatted_list}\n\n"
             f"➕ <b>Add:</b> <code>/addword {diff} word</code>\n"
             f"➖ <b>Del:</b> <code>/delword {diff} word</code>\n"
-            f"🗑️ <b>Clear All:</b> <code>/delallword {diff}</code></blockquote>"
+            f"🗑️ <b>Clear:</b> <code>/delallword {diff}</code></blockquote>"
         )
 
         try:
             await query.message.edit_text(msg, reply_markup=kb, parse_mode=ParseMode.HTML)
         except MessageNotModified:
             pass
-        except Exception:
-            try:
-                await app.send_message(chat_id, msg, reply_markup=kb, parse_mode=ParseMode.HTML)
-            except Exception:
-                pass
 
     elif data == "noop_page":
-        await query.answer("Current Page Number", show_alert=False)
+        await query.answer("Current Page", show_alert=False)
 
     elif data == "back_to_words_menu":
         await query.answer()
@@ -2325,19 +2244,14 @@ async def callback_router(_, query: CallbackQuery):
                 InlineKeyboardButton(f"🟡 𝐌ᴇᴅɪᴜᴍ ({len(WORDS['medium'])})", callback_data="wb_medium_1"),
                 InlineKeyboardButton(f"🔴 𝐇ᴀʀᴅ ({len(WORDS['hard'])})", callback_data="wb_hard_1")
             ],
-            [
-                InlineKeyboardButton("❌ 𝐂ʟᴏsᴇ", callback_data="close_panel")
-            ]
+            [InlineKeyboardButton("❌ 𝐂ʟᴏsᴇ", callback_data="close_panel")]
         ])
         try:
             await query.message.edit_text(
                 "<blockquote>📚 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐖𝐎𝐑𝐃 𝐁𝐀𝐍𝐊</b>\n\n"
-                f"🟢 <b>𝐄ᴀsʏ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['easy'])}</code>\n"
-                f"🟡 <b>𝐌ᴇᴅɪᴜᴍ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['medium'])}</code>\n"
-                f"🔴 <b>𝐇ᴀʀᴅ 𝐖ᴏʀᴅs:</b> <code>{len(WORDS['hard'])}</code>\n\n"
-                "📌 <b>𝐁ᴜʟᴋ 𝐖ᴏʀᴅs 𝐀ᴅᴅ:</b>\n"
-                "<code>/addword easy cat dog bird tree lion</code>\n\n"
-                "Neeche buttons par click karke category ke words check karein (Single-tap copy):</blockquote>",
+                f"🟢 <b>Easy:</b> <code>{len(WORDS['easy'])}</code> | "
+                f"🟡 <b>Medium:</b> <code>{len(WORDS['medium'])}</code> | "
+                f"🔴 <b>Hard:</b> <code>{len(WORDS['hard'])}</code></blockquote>",
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML
             )
@@ -2350,7 +2264,7 @@ async def callback_router(_, query: CallbackQuery):
             return await query.answer("Rebet challenge expire ho chuka hai.", show_alert=True)
 
         if user_id != rebet["original_loser"]:
-            return await query.answer("❌ Yeh comeback button sirf pichle match ke loser ke liye hai!", show_alert=True)
+            return await query.answer("❌ Yeh comeback button sirf pichle loser ke liye hai!", show_alert=True)
 
         if chat_id in JUMBLE_FIGHT:
             return await query.answer("Already match chal raha hai.", show_alert=True)
@@ -2359,10 +2273,8 @@ async def callback_router(_, query: CallbackQuery):
         u_winner = get_user(rebet["original_winner"])
         rebet_amt = rebet["rebet_amount"]
 
-        if u_loser["points"] < rebet_amt:
-            return await query.answer(f"Aapke paas {rebet_amt} points nahi hain.", show_alert=True)
-        if u_winner["points"] < rebet_amt:
-            return await query.answer(f"Opponent ke paas {rebet_amt} points nahi hain.", show_alert=True)
+        if u_loser["points"] < rebet_amt or u_winner["points"] < rebet_amt:
+            return await query.answer(f"Points kam hain dono me se kisi ke paas.", show_alert=True)
 
         FIGHT_LOBBY[chat_id] = {
             "p1": rebet["original_loser"],
@@ -2391,15 +2303,11 @@ async def callback_router(_, query: CallbackQuery):
 
         await app.send_message(
             chat_id,
-            f"<blockquote>⚔️ <b>25% + 25% 𝐂𝐎𝐌𝐄𝐁𝐀𝐂𝐊 𝐑𝐄-𝐁𝐄𝐓 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>\n\n"
-            f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ (Loser):</b> {rebet['loser_mention']}\n"
-            f"🎯 <b>𝐓ᴀʀɢᴇᴛ (Winner):</b> {rebet['winner_mention']}\n\n"
-            f"💵 <b>𝐑ᴇ-𝐁ᴇ𝐓 𝐒ᴛᴀᴋᴇ:</b> <code>{rebet_amt} points each</code> (25% + 25% Pot = <code>{rebet_amt * 2} pts</code>)\n"
-            f"🏆 <b>𝐂ᴏᴍᴇʙᴀᴄᴋ 𝐏ᴀʏᴏᴜᴛ:</b>\n"
-            f"• 25% + 25% Pot: <code>+{rebet_amt * 2} pts</code>\n"
-            f"• Comeback Reward: <code>+100 stars/pts</code>\n"
-            f"• <b>Total Win:</b> <code>{rebet_amt * 2 + 100} points</code> agar {rebet['loser_mention']} jeet gaya!\n\n"
-            f"👉 {rebet['winner_mention']}, kya aap comeback match accept karte ho?</blockquote>",
+            f"<blockquote>⚔️ <b>25% + 25% 𝐂𝐎𝐌𝐄𝐁𝐀𝐂𝐊 𝐑𝐄-𝐁𝐄𝐓!</b>\n\n"
+            f"👤 <b>Challenger:</b> {rebet['loser_mention']}\n"
+            f"🎯 <b>Target:</b> {rebet['winner_mention']}\n\n"
+            f"💵 <b>Re-Bet:</b> <code>{rebet_amt} points each</code>\n"
+            f"🏆 <b>Payout:</b> <code>{rebet_amt * 2 + 100} points</code> agar comeback jeet gaye!</blockquote>",
             reply_markup=kb,
             parse_mode=ParseMode.HTML
         )
@@ -2419,7 +2327,7 @@ async def callback_router(_, query: CallbackQuery):
 
         if data == "f_accept":
             if user_id != lobby["p2"]:
-                return await query.answer("❌ Yeh challenge aapke liye nahi hai! Sirf opponent accept kar sakta hai.", show_alert=True)
+                return await query.answer("❌ Sirf opponent accept kar sakta hai.", show_alert=True)
 
             diff = lobby["difficulty"]
             per_round_hints = int(get_global_config(f"hints_{diff}", 3))
@@ -2429,17 +2337,12 @@ async def callback_router(_, query: CallbackQuery):
                 u1 = get_user(lobby["p1"])
                 u2 = get_user(lobby["p2"])
 
-                if u1["points"] < b_amt:
+                if u1["points"] < b_amt or u2["points"] < b_amt:
                     del FIGHT_LOBBY[chat_id]
-                    return await query.message.edit_text(f"<blockquote>❌ Challenger ke paas <code>{b_amt} points</code> nahi hain. Bet cancel ho gayi.</blockquote>", parse_mode=ParseMode.HTML)
-
-                if u2["points"] < b_amt:
-                    del FIGHT_LOBBY[chat_id]
-                    return await query.message.edit_text(f"<blockquote>❌ Aapke paas <code>{b_amt} points</code> nahi hain. Bet cancel ho gayi.</blockquote>", parse_mode=ParseMode.HTML)
+                    return await query.message.edit_text("<blockquote>❌ Points kam hone ki wajah se match cancel ho gaya.</blockquote>", parse_mode=ParseMode.HTML)
 
                 DB.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (b_amt, lobby["p1"]))
                 DB.execute("UPDATE users SET points = points - ? WHERE user_id = ?", (b_amt, lobby["p2"]))
-
                 now = time.time()
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (lobby["p1"], chat_id, -b_amt, now))
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (lobby["p2"], chat_id, -b_amt, now))
@@ -2462,14 +2365,8 @@ async def callback_router(_, query: CallbackQuery):
                 "is_rebet": lobby.get("is_rebet", False),
                 "orig_stake": lobby.get("orig_stake", lobby.get("bet_amount", 0)),
                 "max_hints": per_round_hints,
-                "hints_left": {
-                    lobby["p1"]: per_round_hints,
-                    lobby["p2"]: per_round_hints
-                },
-                "round_revealed": {
-                    lobby["p1"]: [],
-                    lobby["p2"]: []
-                }
+                "hints_left": {lobby["p1"]: per_round_hints, lobby["p2"]: per_round_hints},
+                "round_revealed": {lobby["p1"]: [], lobby["p2"]: []}
             }
             del FIGHT_LOBBY[chat_id]
 
@@ -2481,25 +2378,24 @@ async def callback_router(_, query: CallbackQuery):
                 chat_id,
                 f"<blockquote>🔥 <b>𝐂ʜᴀʟʟᴇɴɢᴇ 𝐀ᴄᴄᴇᴘᴛᴇᴅ ʙʏ {lobby['m2']}!</b>\n\n"
                 f"⚔️ <b>{lobby['m1']}</b> 🆚 <b>{lobby['m2']}</b>{bet_text}\n"
-                f"💡 <b>Round Hints:</b> <code>{per_round_hints} hints each per round</code>\n"
-                f"🚀 <i>𝐌ᴀᴛᴄʜ sᴛᴀʀᴛɪɴɢ ɪɴ 3 sᴇᴄᴏɴᴅs...</i></blockquote>",
+                f"💡 <b>Round Hints:</b> <code>{per_round_hints} hints each</code>\n"
+                f"🚀 <i>Match starting in 3 seconds...</i></blockquote>",
                 parse_mode=ParseMode.HTML
             )
             asyncio.create_task(delete_after(announcement, 4))
-
             await asyncio.sleep(3)
             asyncio.create_task(fight_next(chat_id))
             return
 
         if user_id not in (lobby["p1"], lobby["p2"]) and not await is_admin_or_owner(query.message.chat, user_id):
-            return await query.answer("❌ Match players hi settings change kar sakte hain.", show_alert=True)
+            return await query.answer("❌ Sirf match players setting badal sakte hain.", show_alert=True)
 
         if data.startswith("f_diff_"):
             lobby["difficulty"] = data.split("_")[2]
-            await query.answer(f"Difficulty set to {lobby['difficulty'].upper()}")
+            await query.answer(f"Difficulty: {lobby['difficulty'].upper()}")
         elif data.startswith("f_time_"):
             lobby["timer"] = int(data.split("_")[2])
-            await query.answer(f"Timer set to {lobby['timer']}s")
+            await query.answer(f"Timer: {lobby['timer']}s")
 
         kb = InlineKeyboardMarkup([
             [
@@ -2518,15 +2414,15 @@ async def callback_router(_, query: CallbackQuery):
             ]
         ])
 
-        header_str = "💰 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀ʟʟᴇɴɢᴇ!</b>" if lobby.get("is_bet") else "⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀𝐋ʟᴇɴɢᴇ!</b>"
-        bet_info = f"\n💵 <b>𝐁ᴇᴛ:</b> <code>{lobby['bet_amount']} pts each</code>" if lobby.get("is_bet") else ""
+        header_str = "💰 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐄𝐓 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>" if lobby.get("is_bet") else "⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 1v1 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>"
+        bet_info = f"\n💵 <b>Bet:</b> <code>{lobby['bet_amount']} pts each</code>" if lobby.get("is_bet") else ""
 
         try:
             await query.message.edit_text(
                 f"<blockquote>{header_str}\n\n"
-                f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ:</b> {lobby['m1']} (<code>{lobby['p1']}</code>)\n"
-                f"🎯 <b>𝐓ᴀʀɢᴇᴛ:</b> {lobby['m2']} (<code>{lobby['p2']}</code>)\n\n"
-                f"⚙️ <b>𝐒ᴇᴛᴛɪɴɢs:</b> Mode: <code>{lobby['difficulty'].title()}</code> | Timer: <code>{lobby['timer']}s</code>{bet_info}\n\n"
+                f"👤 <b>Challenger:</b> {lobby['m1']} (<code>{lobby['p1']}</code>)\n"
+                f"🎯 <b>Target:</b> {lobby['m2']} (<code>{lobby['p2']}</code>)\n\n"
+                f"⚙️ <b>Settings:</b> Mode: <code>{lobby['difficulty'].title()}</code> | Timer: <code>{lobby['timer']}s</code>{bet_info}\n\n"
                 f"👉 {lobby['m2']}, match shuru karne ke liye <b>Accept Challenge</b> par click karo!</blockquote>",
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML
@@ -2548,7 +2444,7 @@ async def callback_router(_, query: CallbackQuery):
 
         elif data == "set_stop_game":
             DB.execute("UPDATE settings SET is_active=0 WHERE chat_id=?", (chat_id,))
-            old_g = DB.execute("SELECT message_id FROM games WHERE chat_id=?", (chat_id,)).fetchone()
+            old_g = DB.execute("SELECT message_id FROM games WHERE chat_id=?", (chat_id,)) .fetchone()
             s = get_settings(chat_id)
             if old_g and s["auto_delete"] and old_g["message_id"]:
                 await safe_delete_and_unpin(chat_id, old_g["message_id"])
@@ -2591,19 +2487,17 @@ async def callback_router(_, query: CallbackQuery):
             d = data.split("_")[2]
             DB.execute("UPDATE settings SET default_diff=? WHERE chat_id=?", (d, chat_id))
             DB.commit()
-            await query.answer(f"Default mode set to {d.upper()}")
+            await query.answer(f"Default mode: {d.upper()}")
             await show_settings_panel(query.message, chat_id)
 
         elif data.startswith("set_t_"):
             parts = data.split("_")
             diff = parts[2].lower()
             secs = int(parts[3])
-            
             if diff in ("easy", "medium", "hard"):
                 DB.execute(f"UPDATE settings SET {diff}=? WHERE chat_id=?", (secs, chat_id))
                 DB.commit()
-                await query.answer(f"✅ {diff.title()} timer updated to {secs}s")
-
+                await query.answer(f"✅ {diff.title()} timer: {secs}s")
             s = get_settings(chat_id)
             kb = build_timers_keyboard(s)
             try:
@@ -2643,7 +2537,7 @@ async def callback_router(_, query: CallbackQuery):
     elif data == "newword":
         old = DB.execute("SELECT * FROM games WHERE chat_id=?", (chat_id,)).fetchone()
         if old and not old["solved"] and time.time() <= old["expires"]:
-            return await query.answer("❌ Current puzzle abhi active hai.", show_alert=True)
+            return await query.answer("❌ Current puzzle active hai.", show_alert=True)
 
         s = get_settings(chat_id)
         difficulty = s["default_diff"] if "default_diff" in s.keys() else "medium"
@@ -2695,22 +2589,31 @@ async def show_settings_panel(message_obj, chat_id):
         pass
 
 # ============================================================
-# AUTO-RESUME GAMES ON BOT STARTUP (RELIABLE & SEQUENTIAL)
+# AUTO-RESUME GAMES ON BOT STARTUP
 # ============================================================
 
 async def resume_all_active_games():
-    await asyncio.sleep(3)
+    await asyncio.sleep(4)
     rows = DB.execute("SELECT chat_id, default_diff FROM settings WHERE is_active = 1 AND chat_id != 0").fetchall()
 
     for row in rows:
         c_id = row["chat_id"]
         diff = row["default_diff"] or "medium"
         try:
+            # Resolve peer first to avoid 'NoneType' has no attribute 'is_premium'
+            try:
+                await app.get_chat(c_id)
+            except Exception:
+                # Chat inaccessible or invalid, disable in database
+                DB.execute("UPDATE settings SET is_active=0 WHERE chat_id=?", (c_id,))
+                DB.commit()
+                continue
+
             DB.execute("DELETE FROM games WHERE chat_id=?", (c_id,))
             DB.commit()
 
             await start_game(c_id, diff, c_id)
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(1.0)
         except Exception as e:
             print(f"Error auto-resuming game in {c_id}: {e}")
 
