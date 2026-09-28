@@ -53,6 +53,9 @@ DB = sqlite3.connect("jumble_game.db", check_same_thread=False)
 DB.row_factory = sqlite3.Row
 LOCK = asyncio.Lock()
 
+# Guess Tracker for both DM and Group rounds
+GUESS_TRACKER = defaultdict(list)
+
 # ============================================================
 # WORD BANK
 # ============================================================
@@ -444,6 +447,23 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
         await app.delete_messages(chat_id, message_id)
     except Exception:
         pass
+    # Service notification (pin bar/message) clean
+    try:
+        await app.delete_messages(chat_id, message_id + 1)
+    except Exception:
+        pass
+
+async def clear_round_guesses(chat_id: int):
+    """Pichle round ke saare wrong guesses ko ek sath chat se bulk delete karega"""
+    msg_ids = GUESS_TRACKER.pop(chat_id, [])
+    if not msg_ids:
+        return
+    try:
+        for i in range(0, len(msg_ids), 100):
+            batch = msg_ids[i:i + 100]
+            await app.delete_messages(chat_id, batch)
+    except Exception:
+        pass
 
 # ============================================================
 # BOT ADDED TO GROUP LISTENER
@@ -491,6 +511,7 @@ async def start_game(chat_id, difficulty, message_or_chat):
         await safe_delete_and_unpin(chat_id, old_game["message_id"])
 
     DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
+    GUESS_TRACKER[chat_id].clear()
 
     word = choose_word(chat_id, difficulty)
     jumbled = jumble_word(word)
@@ -528,6 +549,12 @@ async def start_game(chat_id, difficulty, message_or_chat):
 
         try:
             await sent.pin(disable_notification=True)
+            # Auto delete Telegram's pinned service message
+            if settings["auto_delete"]:
+                try:
+                    await app.delete_messages(chat_id, sent.id + 1)
+                except Exception:
+                    pass
         except Exception:
             pass
     except Exception as e:
@@ -546,6 +573,9 @@ async def expire_game(chat_id, puzzle_id, expires):
 
     DB.execute("UPDATE games SET solved=1 WHERE chat_id=?", (chat_id,))
     DB.commit()
+
+    # Time up hone par guesses clear karo
+    asyncio.create_task(clear_round_guesses(chat_id))
 
     s = get_settings(chat_id)
     if s["auto_delete"] and row["message_id"]:
@@ -595,6 +625,8 @@ async def fight_timeout_task(chat_id, round_num, timer_duration):
         if game and game["round"] == round_num:
             word = game["word"]
 
+            asyncio.create_task(clear_round_guesses(chat_id))
+
             s = get_settings(chat_id)
             if s["auto_delete"] and game.get("msg_id"):
                 await safe_delete_and_unpin(chat_id, game["msg_id"])
@@ -641,8 +673,7 @@ async def fight_next(chat_id):
 
     game["word"] = word
     game["expires"] = time.time() + game["timer"]
-    
-    # Har round me dono players ke liye hints exact equal limit par fresh reset hongi
+
     per_round_hints = int(get_global_config(f"hints_{diff}", 3))
     game["max_hints"] = per_round_hints
     game["hints_left"] = {p: per_round_hints for p in game["players"]}
@@ -674,6 +705,12 @@ async def fight_next(chat_id):
         game["msg_id"] = sent.id
         try:
             await sent.pin(disable_notification=True)
+            s = get_settings(chat_id)
+            if s["auto_delete"]:
+                try:
+                    await app.delete_messages(chat_id, sent.id + 1)
+                except Exception:
+                    pass
         except Exception:
             pass
     except Exception as e:
@@ -692,6 +729,8 @@ async def finish_fight(chat_id):
             game["task"].cancel()
         except Exception:
             pass
+
+    asyncio.create_task(clear_round_guesses(chat_id))
 
     s = get_settings(chat_id)
     if s["auto_delete"] and game.get("msg_id"):
@@ -727,7 +766,7 @@ async def finish_fight(chat_id):
         if winner:
             result += f"🏆 <b>𝐌ᴀᴛᴄʜ 𝐖ɪɴɴᴇʀ:</b> {game['mentions'][winner]} 🎉</blockquote>"
         else:
-            result += "🤝 <b>𝐌ᴀᴛᴄʜ 𝐃ʀᴀᴡ!</b></blockquote>"
+            result += "🤝 <b>𝐌ᴀᴛᴄʜ 𝐃ʀᴀ𝐖!</b></blockquote>"
 
     else:
         if winner:
@@ -739,7 +778,6 @@ async def finish_fight(chat_id):
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (total_payout, winner))
                 DB.execute("UPDATE users SET bet_losses=bet_losses+1 WHERE user_id=?", (loser,))
 
-                # Record in score_history
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, total_payout, now))
                 DB.commit()
 
@@ -762,7 +800,6 @@ async def finish_fight(chat_id):
                 DB.execute("UPDATE users SET points=points+?, bet_wins=bet_wins+1 WHERE user_id=?", (win_reward, winner))
                 DB.execute("UPDATE users SET points=points+?, bet_losses=bet_losses+1 WHERE user_id=?", (loser_cashback, loser))
 
-                # Accurate score_history entries
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (winner, chat_id, win_reward, now))
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (loser, chat_id, loser_cashback, now))
                 DB.commit()
@@ -1126,7 +1163,7 @@ async def settings_cmd(_, message: Message):
         ]
     ])
     await message.reply_text(
-        f"<blockquote>⚙️ <b>𝐉ᴜᴍʙʟᴇ 𝐆ʀᴏᴜᴘ 𝐒ᴇᴛᴛɪɴgs</b>\n\n"
+        f"<blockquote>⚙️ <b>𝐉ᴜᴍʙʟᴇ 𝐆ʀᴏᴜᴘ 𝐒ᴇᴛᴛɪɴɢs</b>\n\n"
         f"🟢 <b>𝐆ᴀᴍᴇ 𝐒ᴛᴀᴛᴜs:</b> <code>{'Running' if s['is_active'] else 'Stopped'}</code>\n"
         f"🗑️ <b>𝐀ᴜᴛᴏ 𝐃ᴇʟᴇᴛᴇ 𝐎ʟᴅ:</b> <code>{'Enabled' if s['auto_delete'] else 'Disabled'}</code>\n"
         f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
@@ -1800,14 +1837,12 @@ async def jumble_cmd(_, message: Message):
     if message.chat.id in JUMBLE_FIGHT:
         return await message.reply_text("<blockquote>⚔️ <b>Jumble Fight chal rahi hai, match khatam hone tak wait karein.</b></blockquote>", parse_mode=ParseMode.HTML)
 
-    # Automatically enable the bot in group settings if disabled
     DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
     DB.commit()
 
     s = get_settings(message.chat.id)
     default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
 
-    # One-time override: User command sets mode for this puzzle only; next ones strictly follow group default
     if len(message.command) > 1:
         req_diff = message.command[1].lower().strip()
         difficulty = req_diff if req_diff in WORDS else default_d
@@ -2048,7 +2083,7 @@ async def jumble_bet_fight_cmd(_, message: Message):
     )
 
 # ============================================================
-# UNIFIED ANSWER HANDLER (CLEAN COMMAND FILTER)
+# UNIFIED ANSWER HANDLER (CLEAN COMMAND FILTER & REAL-TIME CLEANUP)
 # ============================================================
 
 ALL_BOT_COMMANDS = {
@@ -2060,8 +2095,8 @@ ALL_BOT_COMMANDS = {
     "addstar", "addpoints", "deductstar", "deductpoints", "removestar"
 }
 
-@app.on_message(filters.text & filters.group)
-async def group_answer_handler(_, message: Message):
+@app.on_message(filters.text)
+async def unified_answer_handler(_, message: Message):
     if not message.from_user or not message.text:
         return
 
@@ -2086,6 +2121,15 @@ async def group_answer_handler(_, message: Message):
                 return
 
             if time.time() <= game["expires"] and cleaned_input == clean_answer(game["word"]):
+                # Correct answer delete
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+
+                # Clear wrong guesses
+                asyncio.create_task(clear_round_guesses(chat_id))
+
                 curr = asyncio.current_task()
                 if game.get("task") and game["task"] is not curr and not game["task"].done():
                     try:
@@ -2100,7 +2144,8 @@ async def group_answer_handler(_, message: Message):
                     await safe_delete_and_unpin(chat_id, game["msg_id"])
 
                 u_mention = get_mention(message.from_user)
-                r_msg = await message.reply_text(
+                r_msg = await app.send_message(
+                    chat_id,
                     f"<blockquote>⚡ {u_mention} (<code>{user_id}</code>) <b>𝐖𝐎𝐍 𝐑𝐎𝐔𝐍𝐃 {game['round']}!</b>\n"
                     f"🏆 <b>𝐑ᴏᴜɴᴅ 𝐒ᴄᴏʀᴇ:</b> <code>{game['scores'][user_id]}</code></blockquote>",
                     parse_mode=ParseMode.HTML
@@ -2111,14 +2156,25 @@ async def group_answer_handler(_, message: Message):
                 await asyncio.sleep(2.5)
                 asyncio.create_task(fight_next(chat_id))
                 return
+            else:
+                GUESS_TRACKER[chat_id].append(message.id)
         return
 
-    # 2. Normal Game Check
+    # 2. Normal Game Check (DM & Groups)
     game = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (chat_id,)).fetchone()
     if not game or time.time() > game["expires"]:
         return
 
     if cleaned_input == clean_answer(game["word"]):
+        # Winner ka correct answer message turant delete
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        # Puraane saare galat guesses bulk-delete
+        asyncio.create_task(clear_round_guesses(chat_id))
+
         updated = DB.execute("UPDATE games SET solved=1 WHERE chat_id=? AND solved=0", (chat_id,))
         if updated.rowcount != 1:
             return
@@ -2138,7 +2194,6 @@ async def group_answer_handler(_, message: Message):
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
 
-        # Positive point entry into score history
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
             VALUES (?, ?, ?, ?)
@@ -2149,7 +2204,8 @@ async def group_answer_handler(_, message: Message):
             await safe_delete_and_unpin(chat_id, game["message_id"])
 
         u_mention = get_mention(message.from_user)
-        c_msg = await message.reply_text(
+        c_msg = await app.send_message(
+            chat_id,
             f"<blockquote>🎉 <b>𝐂𝐎𝐑𝐑𝐄𝐂𝐓!</b>\n\n"
             f"👤 {u_mention} (<code>{user_id}</code>)\n"
             f"✅ <b>𝐀ɴsᴡᴇʀ:</b> <code>{game['word'].upper()}</code>\n"
@@ -2167,6 +2223,9 @@ async def group_answer_handler(_, message: Message):
         if chat_id not in JUMBLE_FIGHT and s["is_active"]:
             next_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
             asyncio.create_task(start_game(chat_id, next_diff, chat_id))
+    else:
+        # Wrong guess ko tracker me daalein taaki sahi answer aate hi delete ho sake
+        GUESS_TRACKER[chat_id].append(message.id)
 
 # ============================================================
 # CALLBACK QUERIES ROUTER
@@ -2554,6 +2613,7 @@ async def callback_router(_, query: CallbackQuery):
                 await safe_delete_and_unpin(chat_id, old_g["message_id"])
             DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
             DB.commit()
+            asyncio.create_task(clear_round_guesses(chat_id))
             await query.answer("⏹️ Game stopped!")
             await show_settings_panel(query.message, chat_id)
 
@@ -2598,7 +2658,7 @@ async def callback_router(_, query: CallbackQuery):
             parts = data.split("_")
             diff = parts[2].lower()
             secs = int(parts[3])
-            
+
             if diff in ("easy", "medium", "hard"):
                 DB.execute(f"UPDATE settings SET {diff}=? WHERE chat_id=?", (secs, chat_id))
                 DB.commit()
@@ -2624,6 +2684,8 @@ async def callback_router(_, query: CallbackQuery):
 
         DB.execute("UPDATE games SET solved=1 WHERE chat_id=?", (chat_id,))
         DB.commit()
+
+        asyncio.create_task(clear_round_guesses(chat_id))
 
         s = get_settings(chat_id)
         if s["auto_delete"] and game["message_id"]:
