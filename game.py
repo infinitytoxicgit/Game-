@@ -53,7 +53,7 @@ DB = sqlite3.connect("jumble_game.db", check_same_thread=False)
 DB.row_factory = sqlite3.Row
 LOCK = asyncio.Lock()
 
-# Guesses ko clean rakhne ke liye in-memory tracker
+# Sirf genuine wrong guesses ko track karne ke liye
 GUESS_TRACKER = defaultdict(list)
 
 # ============================================================
@@ -225,9 +225,6 @@ def run_migrations():
     if "last_daily" not in user_cols:
         DB.execute("ALTER TABLE users ADD COLUMN last_daily REAL DEFAULT 0")
 
-    # ============================================================
-    # AUTOMATIC LEADERBOARD SYNC (Fixes Inflated Monthly Data)
-    # ============================================================
     try:
         users = DB.execute("SELECT user_id, points FROM users").fetchall()
         now = time.time()
@@ -350,6 +347,24 @@ def get_mention(user_obj=None, user_id=None, first_name=None, username=None):
 def clean_answer(text):
     return "".join(c.lower() for c in str(text) if c.isalnum())
 
+def is_likely_guess(text: str, target_word: str) -> bool:
+    """Sirf unhi messages ko guess manega jo actual me puzzle guess lagte hain."""
+    if not text or not target_word:
+        return False
+    parts = text.strip().split()
+    # Guess hamesha ek single word hota hai (2 ya usse zyada words normal chat hain)
+    if len(parts) != 1:
+        return False
+    cleaned = clean_answer(parts[0])
+    # Agar word pure alphabets ka nahi hai ya bohot chhota/bada hai
+    if len(cleaned) < 3:
+        return False
+    # Target word ke length se match karta ho (±1 letter tolerence guess typo ke liye)
+    target_len = len(target_word)
+    if abs(len(cleaned) - target_len) <= 1:
+        return True
+    return False
+
 def jumble_word(word):
     letters = list(word)
     for _ in range(50):
@@ -449,7 +464,7 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
         pass
 
 async def clear_round_guesses(chat_id: int):
-    """Pichle round ke saare galat guesses ko delete karein"""
+    """Pichle round ke sirf track kiye gaye genuine wrong guesses ko delete karein"""
     msg_ids = GUESS_TRACKER.pop(chat_id, [])
     if not msg_ids:
         return
@@ -461,7 +476,7 @@ async def clear_round_guesses(chat_id: int):
         pass
 
 # ============================================================
-# BOT ADDED TO GROUP LISTENER
+# BOT ADDED TO GROUP & PIN SERVICE CLEANER
 # ============================================================
 
 @app.on_chat_member_updated()
@@ -477,10 +492,6 @@ async def bot_added_handler(_, update: ChatMemberUpdated):
                 ON CONFLICT(chat_id) DO UPDATE SET user_id=excluded.user_id, added_at=excluded.added_at
             """, (chat_id, user_id, time.time()))
             DB.commit()
-
-# ============================================================
-# PIN SERVICE NOTIFICATION CLEANER
-# ============================================================
 
 @app.on_message(filters.pinned_message & filters.group)
 async def clean_pin_service_message(_, message: Message):
@@ -564,6 +575,11 @@ async def start_game(chat_id, difficulty, message_or_chat):
                     pass
         except Exception:
             pass
+    except RPCError as e:
+        if "USER_IS_BLOCKED" in str(e) or "CHANNEL_PRIVATE" in str(e) or "CHAT_WRITE_FORBIDDEN" in str(e):
+            DB.execute("UPDATE settings SET is_active=0 WHERE chat_id=?", (chat_id,))
+            DB.execute("DELETE FROM games WHERE chat_id=?", (chat_id,))
+            DB.commit()
     except Exception as e:
         print(f"Error sending puzzle to {chat_id}: {e}")
 
@@ -1843,14 +1859,12 @@ async def jumble_cmd(_, message: Message):
     if message.chat.id in JUMBLE_FIGHT:
         return await message.reply_text("<blockquote>⚔️ <b>Jumble Fight chal rahi hai, match khatam hone tak wait karein.</b></blockquote>", parse_mode=ParseMode.HTML)
 
-    # Automatically enable the bot in group settings if disabled
     DB.execute("UPDATE settings SET is_active=1 WHERE chat_id=?", (message.chat.id,))
     DB.commit()
 
     s = get_settings(message.chat.id)
     default_d = s["default_diff"] if "default_diff" in s.keys() else "medium"
 
-    # One-time override: User command sets mode for this puzzle only; next ones strictly follow group default
     if len(message.command) > 1:
         req_diff = message.command[1].lower().strip()
         difficulty = req_diff if req_diff in WORDS else default_d
@@ -2091,7 +2105,7 @@ async def jumble_bet_fight_cmd(_, message: Message):
     )
 
 # ============================================================
-# UNIFIED ANSWER HANDLER (CLEAN COMMAND FILTER & REAL-TIME AUTO DELETE)
+# UNIFIED ANSWER HANDLER (ONLY TARGETED GUESS DELETION)
 # ============================================================
 
 ALL_BOT_COMMANDS = {
@@ -2103,17 +2117,22 @@ ALL_BOT_COMMANDS = {
     "addstar", "addpoints", "deductstar", "deductpoints", "removestar"
 }
 
-@app.on_message(filters.text & ~filters.service)
+@app.on_message(filters.text & filters.group)
 async def group_answer_handler(_, message: Message):
     if not message.from_user or not message.text:
         return
 
     txt = message.text.strip()
-    # Har tareeqe ke command trigger ko check karo taaki koi bhi cmd bypass na ho
+    
+    # 1. Ignore Any Commands Cleanly
     if txt.startswith(("/", "!", ".")):
-        cmd_part = txt[1:].split()[0].split("@")[0].lower()
-        if cmd_part in ALL_BOT_COMMANDS or any(cmd_part == c for c in ALL_BOT_COMMANDS):
+        cmd_candidate = txt[1:].split()[0].split("@")[0].lower()
+        if cmd_candidate in ALL_BOT_COMMANDS:
             return
+
+    # 2. Ignore messages that contain tags/mentions/links
+    if "@" in txt or "http://" in txt or "https://" in txt or "t.me/" in txt:
+        return
 
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -2122,7 +2141,9 @@ async def group_answer_handler(_, message: Message):
     if not cleaned_input:
         return
 
-    # 1. Active Jumble Fight Check
+    # --------------------------------------------------------
+    # ACTIVE JUMBLE FIGHT (1v1)
+    # --------------------------------------------------------
     if chat_id in JUMBLE_FIGHT:
         async with LOCK:
             game = JUMBLE_FIGHT.get(chat_id)
@@ -2130,13 +2151,13 @@ async def group_answer_handler(_, message: Message):
                 return
 
             if time.time() <= game["expires"] and cleaned_input == clean_answer(game["word"]):
-                # Sahi answer dete hi haal ki haal answer delete
+                # Sahi answer aane par user ka answer delete
                 try:
                     await message.delete()
                 except Exception:
                     pass
 
-                # Round ke saare puraane wrong guesses delete
+                # Pichle rounds ke wrong guesses delete
                 asyncio.create_task(clear_round_guesses(chat_id))
 
                 curr = asyncio.current_task()
@@ -2166,23 +2187,27 @@ async def group_answer_handler(_, message: Message):
                 asyncio.create_task(fight_next(chat_id))
                 return
             else:
-                # Wrong guess track karo taaki round end/solve pe delete ho
-                GUESS_TRACKER[chat_id].append(message.id)
+                # Sirf tab track karega agar message game ka guess lagta ho (Single word aur target word ke size ka)
+                if is_likely_guess(txt, game["word"]):
+                    GUESS_TRACKER[chat_id].append(message.id)
         return
 
-    # 2. Normal Game Check
+    # --------------------------------------------------------
+    # NORMAL LOOP GAME
+    # --------------------------------------------------------
     game = DB.execute("SELECT * FROM games WHERE chat_id=? AND solved=0", (chat_id,)).fetchone()
     if not game or time.time() > game["expires"]:
         return
 
+    # Sahi answer mil gaya
     if cleaned_input == clean_answer(game["word"]):
-        # Winner ka correct answer message turant delete
+        # Winner ka correct answer haath ke haath delete
         try:
             await message.delete()
         except Exception:
             pass
 
-        # Us round ke pichle saare galat guesses bulk-delete
+        # Us round ke pichle saare wrong guesses bulk delete
         asyncio.create_task(clear_round_guesses(chat_id))
 
         updated = DB.execute("UPDATE games SET solved=1 WHERE chat_id=? AND solved=0", (chat_id,))
@@ -2204,7 +2229,6 @@ async def group_answer_handler(_, message: Message):
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
 
-        # Positive point entry into score history
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
             VALUES (?, ?, ?, ?)
@@ -2234,9 +2258,12 @@ async def group_answer_handler(_, message: Message):
         if chat_id not in JUMBLE_FIGHT and s["is_active"]:
             next_diff = s["default_diff"] if "default_diff" in s.keys() else "medium"
             asyncio.create_task(start_game(chat_id, next_diff, chat_id))
+
     else:
-        # Wrong guess ko tracker me save karo
-        GUESS_TRACKER[chat_id].append(message.id)
+        # Normal chat (e.g. "hello", "aur bhai", "theek ho", etc.) ko touch nahi karega
+        # Sirf single word guess jo target word ke letter count ke aas-paas ho usko track karega
+        if is_likely_guess(txt, game["word"]):
+            GUESS_TRACKER[chat_id].append(message.id)
 
 # ============================================================
 # CALLBACK QUERIES ROUTER
