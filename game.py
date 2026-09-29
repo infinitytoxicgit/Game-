@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
@@ -53,7 +53,7 @@ DB = sqlite3.connect("jumble_game.db", check_same_thread=False)
 DB.row_factory = sqlite3.Row
 LOCK = asyncio.Lock()
 
-# Sirf genuine wrong guesses ko track karne ke liye
+# Sirf valid wrong guesses ke message IDs track honge
 GUESS_TRACKER = defaultdict(list)
 
 # ============================================================
@@ -347,22 +347,36 @@ def get_mention(user_obj=None, user_id=None, first_name=None, username=None):
 def clean_answer(text):
     return "".join(c.lower() for c in str(text) if c.isalnum())
 
-def is_likely_guess(text: str, target_word: str) -> bool:
-    """Sirf unhi messages ko guess manega jo actual me puzzle guess lagte hain."""
-    if not text or not target_word:
+def is_actual_game_guess(raw_text: str, target_word: str) -> bool:
+    """
+    Sirf aur sirf un messages ko guess manega jo actual me puzzle solve
+    karne ke liye bhejhe gaye hain. Normal chat messages ko touch nahi karega.
+    """
+    if not raw_text or not target_word:
         return False
-    parts = text.strip().split()
-    # Guess hamesha ek single word hota hai (2 ya usse zyada words normal chat hain)
+
+    raw_text = raw_text.strip()
+    # Agar 1 word se zyada ho to pakka normal chat hai
+    parts = raw_text.split()
     if len(parts) != 1:
         return False
-    cleaned = clean_answer(parts[0])
-    # Agar word pure alphabets ka nahi hai ya bohot chhota/bada hai
-    if len(cleaned) < 3:
+
+    word_input = clean_answer(parts[0])
+    target = clean_answer(target_word)
+
+    # Word length must be exact match
+    if len(word_input) != len(target):
         return False
-    # Target word ke length se match karta ho (±1 letter tolerence guess typo ke liye)
-    target_len = len(target_word)
-    if abs(len(cleaned) - target_len) <= 1:
+
+    # Exact anagram match (Yaani jumbled letters ko rearrange kiya hua)
+    if Counter(word_input) == Counter(target):
         return True
+
+    # Kam se kam 70% characters puzzle ke target word se match hone chahiye
+    common_chars = sum((Counter(word_input) & Counter(target)).values())
+    if common_chars >= max(3, len(target) - 1):
+        return True
+
     return False
 
 def jumble_word(word):
@@ -464,7 +478,7 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
         pass
 
 async def clear_round_guesses(chat_id: int):
-    """Pichle round ke sirf track kiye gaye genuine wrong guesses ko delete karein"""
+    """Pichle round ke sirf target kiye gaye galat guesses delete karein"""
     msg_ids = GUESS_TRACKER.pop(chat_id, [])
     if not msg_ids:
         return
@@ -476,7 +490,7 @@ async def clear_round_guesses(chat_id: int):
         pass
 
 # ============================================================
-# BOT ADDED TO GROUP & PIN SERVICE CLEANER
+# BOT ADDED TO GROUP & PIN NOTIFICATION CLEANER
 # ============================================================
 
 @app.on_chat_member_updated()
@@ -494,7 +508,7 @@ async def bot_added_handler(_, update: ChatMemberUpdated):
             DB.commit()
 
 @app.on_message(filters.pinned_message & filters.group)
-async def clean_pin_service_message(_, message: Message):
+async def auto_clean_pinned_service_msg(_, message: Message):
     s = get_settings(message.chat.id)
     if s["auto_delete"]:
         try:
@@ -2123,8 +2137,8 @@ async def group_answer_handler(_, message: Message):
         return
 
     txt = message.text.strip()
-    
-    # 1. Ignore Any Commands Cleanly
+
+    # 1. Ignore Any Commands
     if txt.startswith(("/", "!", ".")):
         cmd_candidate = txt[1:].split()[0].split("@")[0].lower()
         if cmd_candidate in ALL_BOT_COMMANDS:
@@ -2157,7 +2171,7 @@ async def group_answer_handler(_, message: Message):
                 except Exception:
                     pass
 
-                # Pichle rounds ke wrong guesses delete
+                # Pichle round ke wrong guesses delete
                 asyncio.create_task(clear_round_guesses(chat_id))
 
                 curr = asyncio.current_task()
@@ -2187,8 +2201,8 @@ async def group_answer_handler(_, message: Message):
                 asyncio.create_task(fight_next(chat_id))
                 return
             else:
-                # Sirf tab track karega agar message game ka guess lagta ho (Single word aur target word ke size ka)
-                if is_likely_guess(txt, game["word"]):
+                # Sirf tab track karega agar message game ka genuine guess lagta ho
+                if is_actual_game_guess(txt, game["word"]):
                     GUESS_TRACKER[chat_id].append(message.id)
         return
 
@@ -2229,6 +2243,7 @@ async def group_answer_handler(_, message: Message):
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
 
+        # Positive point entry into score history
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
             VALUES (?, ?, ?, ?)
@@ -2260,9 +2275,8 @@ async def group_answer_handler(_, message: Message):
             asyncio.create_task(start_game(chat_id, next_diff, chat_id))
 
     else:
-        # Normal chat (e.g. "hello", "aur bhai", "theek ho", etc.) ko touch nahi karega
-        # Sirf single word guess jo target word ke letter count ke aas-paas ho usko track karega
-        if is_likely_guess(txt, game["word"]):
+        # Strict filter: Sirf genuine anagram/subset guesses track honge, normal baatein nahi
+        if is_actual_game_guess(txt, game["word"]):
             GUESS_TRACKER[chat_id].append(message.id)
 
 # ============================================================
