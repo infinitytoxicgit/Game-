@@ -13,7 +13,7 @@ from collections import defaultdict, Counter
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatMemberStatus, ParseMode
-from pyrogram.errors import MessageNotModified, RPCError
+from pyrogram.errors import MessageNotModified, RPCError, FloodWait
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -41,6 +41,8 @@ START_IMG = "https://graph.org/file/7c0c03d68308f0c5dad42-ddb933df03f0ff0632.jpg
 SUPPORT_GC = "https://t.me/Roohi_Soul_Gc"
 ADD_ME_URL = "https://t.me/Jumbles_Words_Bot?startgroup=true"
 MUSIC_BOT_URL = "https://t.me/Roohi_Queen_Bot?start=_tgr_yN-6yUs4ZmRh"
+CLUB_GROUP_URL = "https://t.me/+6WAn7xrGlg9hZjgx"
+LOG_CHANNEL_ID = -1004320603089
 
 app = Client(
     "advanced_jumble_bot",
@@ -186,6 +188,18 @@ CREATE TABLE IF NOT EXISTS score_history (
     points INTEGER,
     timestamp REAL
 );
+
+CREATE TABLE IF NOT EXISTS club_join_claims (
+    user_id INTEGER PRIMARY KEY,
+    claimed_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS broadcast_logs (
+    broadcast_id INTEGER,
+    chat_id INTEGER,
+    message_id INTEGER,
+    PRIMARY KEY (broadcast_id, chat_id, message_id)
+);
 """)
 DB.commit()
 
@@ -198,7 +212,9 @@ def run_migrations():
         "hints_medium": 3,
         "hints_hard": 3,
         "daily_points": 50,
-        "bonus_points": 100
+        "bonus_points": 100,
+        "join_reward_points": 1000,
+        "log_enabled": 1
     }
     for k, v in defaults.items():
         DB.execute("INSERT OR IGNORE INTO bot_config (key, value) VALUES (?, ?)", (k, v))
@@ -348,15 +364,10 @@ def clean_answer(text):
     return "".join(c.lower() for c in str(text) if c.isalnum())
 
 def is_actual_game_guess(raw_text: str, target_word: str) -> bool:
-    """
-    Sirf aur sirf un messages ko guess manega jo actual me puzzle solve
-    karne ke liye bhejhe gaye hain. Normal chat messages ko touch nahi karega.
-    """
     if not raw_text or not target_word:
         return False
 
     raw_text = raw_text.strip()
-    # Agar 1 word se zyada ho to pakka normal chat hai
     parts = raw_text.split()
     if len(parts) != 1:
         return False
@@ -364,15 +375,12 @@ def is_actual_game_guess(raw_text: str, target_word: str) -> bool:
     word_input = clean_answer(parts[0])
     target = clean_answer(target_word)
 
-    # Word length must be exact match
     if len(word_input) != len(target):
         return False
 
-    # Exact anagram match (Yaani jumbled letters ko rearrange kiya hua)
     if Counter(word_input) == Counter(target):
         return True
 
-    # Kam se kam 70% characters puzzle ke target word se match hone chahiye
     common_chars = sum((Counter(word_input) & Counter(target)).values())
     if common_chars >= max(3, len(target) - 1):
         return True
@@ -478,7 +486,6 @@ async def safe_delete_and_unpin(chat_id: int, message_id: int):
         pass
 
 async def clear_round_guesses(chat_id: int):
-    """Pichle round ke sirf target kiye gaye galat guesses delete karein"""
     msg_ids = GUESS_TRACKER.pop(chat_id, [])
     if not msg_ids:
         return
@@ -489,12 +496,22 @@ async def clear_round_guesses(chat_id: int):
     except Exception:
         pass
 
+async def send_log_event(text: str):
+    """Live Log Channel sender"""
+    if not get_global_config("log_enabled", 1):
+        return
+    try:
+        await app.send_message(LOG_CHANNEL_ID, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception:
+        pass
+
 # ============================================================
-# BOT ADDED TO GROUP & PIN NOTIFICATION CLEANER
+# BOT ADDED TO GROUP, PIN NOTIFICATION CLEANER & JOIN BONUS
 # ============================================================
 
 @app.on_chat_member_updated()
 async def bot_added_handler(_, update: ChatMemberUpdated):
+    # Track Bot added as Admin
     if update.new_chat_member and update.new_chat_member.user and update.new_chat_member.user.is_self:
         if update.from_user and not update.from_user.is_bot:
             chat_id = update.chat.id
@@ -506,6 +523,51 @@ async def bot_added_handler(_, update: ChatMemberUpdated):
                 ON CONFLICT(chat_id) DO UPDATE SET user_id=excluded.user_id, added_at=excluded.added_at
             """, (chat_id, user_id, time.time()))
             DB.commit()
+
+    # User Joining Group / Club Bonus Check
+    if update.new_chat_member and update.new_chat_member.user and not update.new_chat_member.user.is_bot:
+        u_obj = update.new_chat_member.user
+        ensure_user(u_obj)
+        u_id = u_obj.id
+
+        is_new_join = False
+        if update.old_chat_member and update.old_chat_member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED, None):
+            if update.new_chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED, ChatMemberStatus.ADMINISTRATOR):
+                is_new_join = True
+        elif not update.old_chat_member and update.new_chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+            is_new_join = True
+
+        if is_new_join:
+            claimed = DB.execute("SELECT 1 FROM club_join_claims WHERE user_id=?", (u_id,)).fetchone()
+            if not claimed:
+                join_reward = get_global_config("join_reward_points", 1000)
+                now = time.time()
+                DB.execute("INSERT OR IGNORE INTO club_join_claims (user_id, claimed_at) VALUES (?, ?)", (u_id, now))
+                DB.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (join_reward, u_id))
+                DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (u_id, update.chat.id, join_reward, now))
+                DB.commit()
+
+                # User notification DM
+                try:
+                    await app.send_message(
+                        u_id,
+                        f"<blockquote>🎉 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐂𝐋𝐔𝐁 𝐉𝐎𝐈𝐍 𝐁𝐎𝐍𝐔𝐒!</b>\n\n"
+                        f"Humare official club group ko join karne ke liye aapko single-time <b>+{join_reward} points</b> reward diya gaya hai!\n"
+                        f"Check your balance with <code>/stats</code>. Enjoy playing!</blockquote>",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+
+                # Live log
+                u_m = get_mention(u_obj)
+                c_title = html.escape(update.chat.title or "Club Group")
+                asyncio.create_task(send_log_event(
+                    f"<blockquote>🎁 <b>𝐍𝐄𝐖 𝐂𝐋𝐔𝐁 𝐌𝐄𝐌𝐁𝐄𝐑 𝐉𝐎𝐈𝐍 𝐁𝐎𝐍𝐔𝐒</b>\n\n"
+                    f"👤 <b>User:</b> {u_m} (<code>{u_id}</code>)\n"
+                    f"⭐ <b>Reward:</b> <code>+{join_reward} pts</code>\n"
+                    f"🏷️ <b>Group:</b> {c_title} (<code>{update.chat.id}</code>)</blockquote>"
+                ))
 
 @app.on_message(filters.pinned_message & filters.group)
 async def auto_clean_pinned_service_msg(_, message: Message):
@@ -965,6 +1027,9 @@ async def start_cmd(_, message: Message):
         ],
         [
             InlineKeyboardButton("˹ 𓆩ℛᴏ֟፝ᴏʜɪ ꭙ 𝐌ᴜ֟፝sɪᴄ𓆪˼ ♪", url=MUSIC_BOT_URL)
+        ],
+        [
+            InlineKeyboardButton("🧩 Jumble Puzzle Club!", url=CLUB_GROUP_URL)
         ]
     ])
 
@@ -1003,6 +1068,10 @@ async def help_cmd(_, message: Message):
             "• <code>/sethint [easy|med|hard] [hints]</code> — 𝐒ᴇᴛ ɢʟᴏʙᴀʟ ʜɪɴᴛs\n"
             "• <code>/setdaily [points]</code> — 𝐒ᴇᴛ ᴅᴀɪʟʏ ᴄʟᴀɪᴍ ʀᴇᴡᴀʀᴅ\n"
             "• <code>/setbonus [points]</code> — 𝐒ᴇᴛ ɢʀᴏᴜᴘ ʙᴏɴᴜs ʀᴇᴡᴀʀᴅ\n"
+            "• <code>/joinreward [points]</code> — <b>Set Club Join Bonus Points</b>\n"
+            "• <code>/log [enable|disable]</code> — <b>Manage Live Game Logs</b>\n"
+            "• <code>/link [chat_id]</code> — <b>Generate Instant Group Link</b>\n"
+            "• <code>/botstats</code> — <b>View Deep Bot Analytics & Health</b>\n"
             "• <code>/addstar [user] [points]</code> — <b>Add Points/Stars</b>\n"
             "• <code>/deductstar [user] [points]</code> — <b>Deduct Points/Stars</b>\n"
             "• <code>/update</code> — 𝐆ɪᴛ sᴛᴀsʜ, ᴘᴜʟʟ & 𝐀ᴜᴛᴏ-ʀᴇsᴜᴍᴇ</blockquote>"
@@ -1010,6 +1079,10 @@ async def help_cmd(_, message: Message):
     if message.from_user and is_owner(message.from_user.id):
         text += (
             "\n\n<blockquote>👑 <b>𝐎ᴡɴᴇʀ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
+            "• <code>/broadcast [text]</code> — Broadcast to all users & groups\n"
+            "• <code>/broadcast -user [text]</code> — Broadcast only to DM users\n"
+            "• <code>/broadcast -pinloud [text]</code> — Broadcast with clean pin\n"
+            "• <code>/delbroadcast</code> (Reply) — Delete broadcast message from all chats\n"
             "• <code>/auth @user</code> — 𝐆ʀᴀɴᴛ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
             "• <code>/unauth @user</code> — 𝐑ᴇᴠᴏᴋᴇ ᴀᴜᴛʜ ᴀᴄᴄᴇss\n"
             "• <code>/authlist</code> — 𝐋ɪsᴛ ᴏғ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ ᴜsᴇʀs\n"
@@ -1437,6 +1510,279 @@ async def bonus_cmd(_, message: Message):
         f"<blockquote>🎉 <b>𝐆ʀᴏᴜᴘ 𝐁ᴏɴᴜs 𝐂ʟᴀɪᴍᴇᴅ!</b>\n\n"
         f"👤 {mention}\n"
         f"⭐ <b>+{bonus_pts} Points</b> successfully aapke profile mein add ho gaye hain bot ko add karke admin banane ke reward ke roop mein!</blockquote>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ============================================================
+# NEW FEATURE: /joinreward (CONFIG FOR CLUB JOIN BONUS)
+# ============================================================
+
+@app.on_message(filters.command("joinreward"))
+async def set_join_reward_cmd(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Auth users join reward set kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    if len(message.command) < 2:
+        cur_val = get_global_config("join_reward_points", 1000)
+        return await message.reply_text(f"<blockquote>⚙️ <b>Current Club Join Reward:</b> <code>{cur_val} points</code>\n\nUsage: <code>/joinreward 1000</code></blockquote>", parse_mode=ParseMode.HTML)
+
+    try:
+        val = int(message.command[1])
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        return await message.reply_text("❌ Invalid points number.")
+
+    set_global_config("join_reward_points", val)
+    await message.reply_text(f"<blockquote>✅ <b>Club join bonus reward <b>{val} points</b> successfully set kar diya gaya!</b></blockquote>", parse_mode=ParseMode.HTML)
+
+# ============================================================
+# NEW FEATURE: /log enable | disable
+# ============================================================
+
+@app.on_message(filters.command("log"))
+async def toggle_log_cmd(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Auth users logs toggle kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    if len(message.command) < 2:
+        cur_status = "Enabled" if get_global_config("log_enabled", 1) else "Disabled"
+        return await message.reply_text(f"<blockquote>📋 <b>Live Logs Status:</b> <code>{cur_status}</code>\nTarget: <code>{LOG_CHANNEL_ID}</code>\n\nUsage:\n• <code>/log enable</code>\n• <code>/log disable</code></blockquote>", parse_mode=ParseMode.HTML)
+
+    action = message.command[1].lower().strip()
+    if action in ("enable", "on", "1"):
+        set_global_config("log_enabled", 1)
+        await message.reply_text("<blockquote>✅ <b>Live Game Logs have been ENABLED!</b>\nTarget Channel: <code>-1004320603089</code></blockquote>", parse_mode=ParseMode.HTML)
+    elif action in ("disable", "off", "0"):
+        set_global_config("log_enabled", 0)
+        await message.reply_text("<blockquote>🛑 <b>Live Game Logs have been DISABLED!</b></blockquote>", parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text("❌ Usage: <code>/log enable</code> ya <code>/log disable</code>", parse_mode=ParseMode.HTML)
+
+# ============================================================
+# NEW FEATURE: /link <group_id>
+# ============================================================
+
+@app.on_message(filters.command("link"))
+async def create_group_link_cmd(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Auth users group link nikal sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    if len(message.command) < 2:
+        return await message.reply_text("<blockquote>📌 <b>Usage:</b> <code>/link -1001234567890</code></blockquote>", parse_mode=ParseMode.HTML)
+
+    raw_chat = message.command[1].strip()
+    try:
+        target_chat_id = int(raw_chat)
+    except ValueError:
+        return await message.reply_text("❌ Group ID integer number honi chahiye.")
+
+    status_msg = await message.reply_text("🔄 <i>Generating invite link...</i>", parse_mode=ParseMode.HTML)
+    try:
+        chat = await app.get_chat(target_chat_id)
+        # Try export primary invite link or create new
+        try:
+            link_obj = await app.create_chat_invite_link(target_chat_id, name="Auto-Generated by Bot")
+            invite_url = link_obj.invite_link
+        except Exception:
+            invite_url = await app.export_chat_invite_link(target_chat_id)
+
+        clean_title = html.escape(chat.title or "Group")
+        await status_msg.edit_text(
+            f"<blockquote>🔗 <b>𝐆𝐑𝐎𝐔𝐏 𝐈𝐍𝐕𝐈𝐓𝐄 𝐋𝐈𝐍𝐊</b>\n\n"
+            f"🏷️ <b>Title:</b> {clean_title}\n"
+            f"🆔 <b>Chat ID:</b> <code>{target_chat_id}</code>\n"
+            f"🌐 <b>Link:</b> <a href='{invite_url}'>{invite_url}</a></blockquote>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"<blockquote>❌ <b>Link Generate Failed:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Make sure bot is present in that group as admin with invite permissions!</i></blockquote>", parse_mode=ParseMode.HTML)
+
+# ============================================================
+# NEW FEATURE: /botstats (DEEP ANALYTICS)
+# ============================================================
+
+@app.on_message(filters.command(["botstats", "statsbot", "systemstats"]))
+async def bot_deep_stats_cmd(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("<blockquote>❌ <b>Sirf Owner aur Auth users bot analytics check kar sakte hain.</b></blockquote>", parse_mode=ParseMode.HTML)
+
+    status_msg = await message.reply_text("📊 <i>Calculating deep bot statistics...</i>", parse_mode=ParseMode.HTML)
+
+    total_users = DB.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+    total_groups_configured = DB.execute("SELECT COUNT(*) as c FROM settings WHERE chat_id < 0").fetchone()["c"]
+    active_groups = DB.execute("SELECT COUNT(*) as c FROM settings WHERE chat_id < 0 AND is_active=1").fetchone()["c"]
+    stopped_groups = total_groups_configured - active_groups
+
+    total_puzzles_solved = DB.execute("SELECT SUM(solved) as s FROM users").fetchone()["s"] or 0
+    total_points_circulating = DB.execute("SELECT SUM(points) as p FROM users").fetchone()["p"] or 0
+    total_auths = DB.execute("SELECT COUNT(*) as c FROM auth_users").fetchone()["c"]
+    total_custom_words = DB.execute("SELECT COUNT(*) as c FROM custom_words").fetchone()["c"]
+    club_claims = DB.execute("SELECT COUNT(*) as c FROM club_join_claims").fetchone()["c"]
+
+    total_words_count = len(WORDS["easy"]) + len(WORDS["medium"]) + len(WORDS["hard"])
+    active_fights_now = len(JUMBLE_FIGHT)
+
+    # Real-time dialog check for blocked/active detection
+    dialog_groups = 0
+    dialog_dms = 0
+    blocked_estimate = stopped_groups
+
+    stats_text = (
+        f"<blockquote>📈 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐎𝐓 𝐃𝐄𝐄𝐏 𝐀𝐍𝐀𝐋𝐘𝐓𝐈𝐂𝐒</b>\n\n"
+        f"👥 <b>Total Registered Players:</b> <code>{total_users:,}</code>\n"
+        f"🏰 <b>Total Configured Groups:</b> <code>{total_groups_configured:,}</code>\n"
+        f"  ├ 🟢 <b>Active Playing Groups:</b> <code>{active_groups:,}</code>\n"
+        f"  └ 🔴 <b>Stopped / Inactive / Blocked:</b> <code>{blocked_estimate:,}</code>\n\n"
+        f"🎁 <b>Club Bonus Claimants:</b> <code>{club_claims:,}</code> users\n"
+        f"🧩 <b>Total Puzzles Solved:</b> <code>{total_puzzles_solved:,}</code>\n"
+        f"💰 <b>Total Points Circulating:</b> <code>{total_points_circulating:,} pts</code>\n\n"
+        f"📚 <b>Word Bank Database:</b>\n"
+        f"  ├ Easy: <code>{len(WORDS['easy'])}</code> | Medium: <code>{len(WORDS['medium'])}</code> | Hard: <code>{len(WORDS['hard'])}</code>\n"
+        f"  ├ Custom Added Words: <code>{total_custom_words}</code>\n"
+        f"  └ <b>Total Active Words:</b> <code>{total_words_count:,}</code>\n\n"
+        f"⚔️ <b>Active 1v1 Fights Right Now:</b> <code>{active_fights_now}</code>\n"
+        f"🔐 <b>Authorized Admins:</b> <code>{total_auths}</code>\n"
+        f"👑 <b>Owner ID:</b> <code>{OWNER_ID}</code></blockquote>"
+    )
+
+    await status_msg.edit_text(stats_text, parse_mode=ParseMode.HTML)
+
+# ============================================================
+# NEW FEATURE: BROADCAST SYSTEM & AUTO-DELETE BROADCAST
+# ============================================================
+
+@app.on_message(filters.command("broadcast") & filters.user(OWNER_ID))
+async def broadcast_handler(_, message: Message):
+    if len(message.command) < 2 and not message.reply_to_message:
+        return await message.reply_text(
+            "<blockquote>📢 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐑𝐎𝐀𝐃𝐂𝐀𝐒𝐓 𝐒𝐔𝐈𝐓𝐄</b>\n\n"
+            "• <code>/broadcast [text]</code> — All DM users and groups\n"
+            "• <code>/broadcast -user [text]</code> — Sirf DM Users ko\n"
+            "• <code>/broadcast -pinloud [text]</code> — Pin notification ke sath DM aur Groups me\n\n"
+            "<i>Kisi text message par reply karke bhi command chala sakte ho.</i></blockquote>",
+            parse_mode=ParseMode.HTML
+        )
+
+    mode = "all"
+    args = message.text.split(None, 2)
+    broadcast_text = ""
+
+    if len(args) >= 2 and args[1].lower() in ("-user", "-users"):
+        mode = "user_only"
+        if len(args) == 3:
+            broadcast_text = args[2]
+    elif len(args) >= 2 and args[1].lower() in ("-pinloud", "-pin"):
+        mode = "pinloud"
+        if len(args) == 3:
+            broadcast_text = args[2]
+    else:
+        broadcast_text = message.text.split(None, 1)[1] if len(args) >= 2 else ""
+
+    if not broadcast_text and message.reply_to_message:
+        broadcast_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+
+    if not broadcast_text:
+        return await message.reply_text("❌ Broadcast text nahi mila.")
+
+    status_msg = await message.reply_text("🚀 <i>Starting broadcast across network...</i>", parse_mode=ParseMode.HTML)
+
+    target_chats = []
+    if mode == "user_only":
+        user_rows = DB.execute("SELECT user_id FROM users").fetchall()
+        target_chats = [r["user_id"] for r in user_rows]
+    else:
+        # All users + all groups
+        user_rows = DB.execute("SELECT user_id FROM users").fetchall()
+        group_rows = DB.execute("SELECT chat_id FROM settings WHERE chat_id < 0").fetchall()
+        target_chats = [r["user_id"] for r in user_rows] + [r["chat_id"] for r in group_rows]
+
+    target_chats = list(set(target_chats))
+    broadcast_id = int(time.time())
+
+    sent_count = 0
+    failed_count = 0
+
+    for c_id in target_chats:
+        try:
+            sent = await app.send_message(c_id, broadcast_text, parse_mode=ParseMode.HTML)
+            sent_count += 1
+
+            # Log to DB for /delbroadcast
+            DB.execute("INSERT OR IGNORE INTO broadcast_logs (broadcast_id, chat_id, message_id) VALUES (?, ?, ?)", (broadcast_id, c_id, sent.id))
+
+            if mode == "pinloud":
+                try:
+                    await sent.pin(disable_notification=False)
+                    # Clean the pin message if in group
+                    if c_id < 0:
+                        try:
+                            await app.delete_messages(c_id, sent.id + 1)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            await asyncio.sleep(0.05)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+        except Exception:
+            failed_count += 1
+            continue
+
+    DB.commit()
+
+    report = (
+        f"<blockquote>📢 <b>𝐁𝐑𝐎𝐀𝐃𝐂𝐀𝐒𝐓 𝐂𝐎𝐌𝐏𝐋𝐄𝐓𝐄𝐃!</b>\n\n"
+        f"🆔 <b>Broadcast Batch ID:</b> <code>{broadcast_id}</code>\n"
+        f"🎯 <b>Mode:</b> <code>{mode.upper()}</code>\n"
+        f"✅ <b>Successfully Delivered:</b> <code>{sent_count}</code>\n"
+        f"❌ <b>Failed / Blocked:</b> <code>{failed_count}</code>\n\n"
+        f"🗑️ <i>Is broadcast ko wapas delete karne ke liye bot ke is report message par reply karke <code>/delbroadcast</code> likhein!</i></blockquote>"
+    )
+    await status_msg.edit_text(report, parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("delbroadcast") & filters.user(OWNER_ID))
+async def del_broadcast_cmd(_, message: Message):
+    broadcast_id = None
+
+    if message.reply_to_message and message.reply_to_message.text:
+        match = re.search(r"Broadcast Batch ID:\s*(\d+)", message.reply_to_message.text)
+        if match:
+            broadcast_id = int(match.group(1))
+
+    if not broadcast_id and len(message.command) >= 2 and message.command[1].isdigit():
+        broadcast_id = int(message.command[1])
+
+    if not broadcast_id:
+        # Fallback to the latest broadcast
+        row = DB.execute("SELECT broadcast_id FROM broadcast_logs ORDER BY broadcast_id DESC LIMIT 1").fetchone()
+        if row:
+            broadcast_id = row["broadcast_id"]
+        else:
+            return await message.reply_text("<blockquote>❌ Koi broadcast batch ID nahi mili. Broadcast report par reply karein ya batch id dein: <code>/delbroadcast 12345678</code></blockquote>", parse_mode=ParseMode.HTML)
+
+    status_msg = await message.reply_text(f"🗑️ <i>Deleting broadcast messages for batch <code>{broadcast_id}</code>...</i>", parse_mode=ParseMode.HTML)
+
+    logs = DB.execute("SELECT chat_id, message_id FROM broadcast_logs WHERE broadcast_id=?", (broadcast_id,)).fetchall()
+    deleted = 0
+
+    for l in logs:
+        try:
+            await app.delete_messages(l["chat_id"], l["message_id"])
+            deleted += 1
+            await asyncio.sleep(0.04)
+        except Exception:
+            pass
+
+    DB.execute("DELETE FROM broadcast_logs WHERE broadcast_id=?", (broadcast_id,))
+    DB.commit()
+
+    await status_msg.edit_text(
+        f"<blockquote>✅ <b>𝐃𝐄𝐋𝐄𝐓𝐄 𝐁𝐑𝐎𝐀𝐃𝐂𝐀𝐒𝐓 𝐅𝐈𝐍𝐈𝐒𝐇𝐄𝐃!</b>\n\n"
+        f"🆔 <b>Batch ID:</b> <code>{broadcast_id}</code>\n"
+        f"🗑️ <b>Deleted Across Chats:</b> <code>{deleted} messages</code></blockquote>",
         parse_mode=ParseMode.HTML
     )
 
@@ -2111,7 +2457,7 @@ async def jumble_bet_fight_cmd(_, message: Message):
         f"💵 <b>𝐁ᴇᴛ 𝐒ᴛᴀᴋᴇ:</b> <code>{amount} points each</code> (Pot: <code>{amount * 2} pts</code>)\n"
         f"🏆 <b>75% 𝐖ɪɴɴᴇʀ 𝐏ᴀʏᴏᴜᴛ:</b> <code>{int(amount * 2 * 0.75)} pts</code>\n"
         f"🛡️ <b>25% 𝐋ᴏsᴇʀ 𝐂ᴀsʜʙᴀᴄᴋ:</b> <code>{amount * 2 - int(amount * 2 * 0.75)} pts</code>\n"
-        f"⚙️ <b>𝐌ᴏᴅᴇ:</b> <code>{diff.title()}</code> | ⏱️ <b>𝐓ɪᴍᴇʀ:</b> <code>60s</code>\n\n"
+        f"⚙️ <b>𝐌ᴏᴅᴇ:</b> <code>{diff.title()}</code> | ⏱️️ <b>𝐓ɪᴍᴇʀ:</b> <code>60s</code>\n\n"
         f"👉 {m2}, match shuru karne ke liye <b>Accept Bet</b> par click karo!\n"
         f"<i>(Points tab hi deduct honge jab target accept karega)</i></blockquote>",
         reply_markup=kb,
@@ -2124,11 +2470,12 @@ async def jumble_bet_fight_cmd(_, message: Message):
 
 ALL_BOT_COMMANDS = {
     "start", "help", "jumble", "jumblefight", "fight", "rapido", "jumblebetfight", "betfight",
-    "settings", "setting", "setpoints", "sethint", "setdaily", "setbonus", "daily", "bonus",
+    "settings", "setting", "setpoints", "sethint", "setdaily", "setbonus", "joinreward", "daily", "bonus",
     "private", "public", "addword", "addwords", "delword", "delallword", "delallwords",
     "clearword", "clearwords", "word", "words", "auth", "unauth", "authlist", "update", "gitpull",
     "stats", "stat", "mystats", "score", "leaderboard", "top", "rank", "lb", "backup", "dbbackup", "getdb",
-    "addstar", "addpoints", "deductstar", "deductpoints", "removestar"
+    "addstar", "addpoints", "deductstar", "deductpoints", "removestar", "log", "link", "botstats",
+    "broadcast", "delbroadcast"
 }
 
 @app.on_message(filters.text & filters.group)
@@ -2165,13 +2512,11 @@ async def group_answer_handler(_, message: Message):
                 return
 
             if time.time() <= game["expires"] and cleaned_input == clean_answer(game["word"]):
-                # Sahi answer aane par user ka answer delete
                 try:
                     await message.delete()
                 except Exception:
                     pass
 
-                # Pichle round ke wrong guesses delete
                 asyncio.create_task(clear_round_guesses(chat_id))
 
                 curr = asyncio.current_task()
@@ -2197,11 +2542,20 @@ async def group_answer_handler(_, message: Message):
                 if s["auto_delete"]:
                     asyncio.create_task(delete_after(r_msg, 4))
 
+                # Live channel log
+                c_title = html.escape(message.chat.title or "Group")
+                asyncio.create_task(send_log_event(
+                    f"<blockquote>⚔️ <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐅𝐈𝐆𝐇𝐓 𝐑𝐎𝐔𝐍𝐃 𝐖𝐎𝐍</b>\n\n"
+                    f"👤 <b>Player:</b> {u_mention} (<code>{user_id}</code>)\n"
+                    f"✅ <b>Word:</b> <code>{game['word'].upper()}</code>\n"
+                    f"🎯 <b>Round:</b> <code>{game['round']}/10</code>\n"
+                    f"🏷️ <b>Group:</b> {c_title} (<code>{chat_id}</code>)</blockquote>"
+                ))
+
                 await asyncio.sleep(2.5)
                 asyncio.create_task(fight_next(chat_id))
                 return
             else:
-                # Sirf tab track karega agar message game ka genuine guess lagta ho
                 if is_actual_game_guess(txt, game["word"]):
                     GUESS_TRACKER[chat_id].append(message.id)
         return
@@ -2213,15 +2567,12 @@ async def group_answer_handler(_, message: Message):
     if not game or time.time() > game["expires"]:
         return
 
-    # Sahi answer mil gaya
     if cleaned_input == clean_answer(game["word"]):
-        # Winner ka correct answer haath ke haath delete
         try:
             await message.delete()
         except Exception:
             pass
 
-        # Us round ke pichle saare wrong guesses bulk delete
         asyncio.create_task(clear_round_guesses(chat_id))
 
         updated = DB.execute("UPDATE games SET solved=1 WHERE chat_id=? AND solved=0", (chat_id,))
@@ -2243,7 +2594,6 @@ async def group_answer_handler(_, message: Message):
             WHERE user_id=?
         """, (pts_reward, new_streak, best, user_id))
 
-        # Positive point entry into score history
         DB.execute("""
             INSERT INTO score_history (user_id, chat_id, points, timestamp)
             VALUES (?, ?, ?, ?)
@@ -2265,6 +2615,18 @@ async def group_answer_handler(_, message: Message):
             parse_mode=ParseMode.HTML
         )
 
+        # Live channel log
+        c_title = html.escape(message.chat.title or "Group")
+        asyncio.create_task(send_log_event(
+            f"<blockquote>🧩 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐖𝐎𝐑𝐃 𝐆𝐔𝐄𝐒𝐒𝐄𝐃!</b>\n\n"
+            f"👤 <b>Player:</b> {u_mention} (<code>{user_id}</code>)\n"
+            f"✅ <b>Word:</b> <code>{game['word'].upper()}</code>\n"
+            f"⭐ <b>Points Added:</b> <code>+{pts_reward} pts</code>\n"
+            f"🔥 <b>New Streak:</b> <code>{new_streak}</code>\n"
+            f"🎯 <b>Mode:</b> <code>{game['difficulty'].upper()}</code>\n"
+            f"🏷️️ <b>Group:</b> {c_title} (<code>{chat_id}</code>)</blockquote>"
+        ))
+
         if settings["auto_delete"]:
             asyncio.create_task(delete_after(c_msg, 4))
 
@@ -2275,7 +2637,6 @@ async def group_answer_handler(_, message: Message):
             asyncio.create_task(start_game(chat_id, next_diff, chat_id))
 
     else:
-        # Strict filter: Sirf genuine anagram/subset guesses track honge, normal baatein nahi
         if is_actual_game_guess(txt, game["word"]):
             GUESS_TRACKER[chat_id].append(message.id)
 
@@ -2502,7 +2863,7 @@ async def callback_router(_, query: CallbackQuery):
 
         await app.send_message(
             chat_id,
-            f"<blockquote>⚔️ <b>25% + 25% 𝐂𝐎𝐌𝐄𝐁𝐀𝐂𝐊 𝐑𝐄-𝐁𝐄𝐓 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>\n\n"
+            f"<blockquote>⚔️️ <b>25% + 25% 𝐂𝐎𝐌𝐄𝐁𝐀𝐂𝐊 𝐑𝐄-𝐁𝐄𝐓 𝐂𝐇𝐀𝐋𝐋𝐄𝐍𝐆𝐄!</b>\n\n"
             f"👤 <b>𝐂ʜᴀʟʟᴇɴɢᴇʀ (Loser):</b> {rebet['loser_mention']}\n"
             f"🎯 <b>𝐓ᴀʀɢᴇᴛ (Winner):</b> {rebet['winner_mention']}\n\n"
             f"💵 <b>𝐑ᴇ-𝐁ᴇ𝐓 𝐒ᴛᴀᴋᴇ:</b> <code>{rebet_amt} points each</code> (25% + 25% Pot = <code>{rebet_amt * 2} pts</code>)\n"
