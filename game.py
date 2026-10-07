@@ -499,6 +499,7 @@ async def clear_round_guesses(chat_id: int):
         pass
 
 def get_user_meta_stats(user_id: int):
+    """Accurately calculates user stats using dynamically stored bonus values"""
     u = get_user(user_id)
     total_pts = u["points"] if u else 0
 
@@ -507,7 +508,9 @@ def get_user_meta_stats(user_id: int):
 
     bonus_sum_row = DB.execute("SELECT COUNT(*) as c FROM group_bonus WHERE user_id=?", (user_id,)).fetchone()
     bonus_claimed_count = bonus_sum_row["c"] if bonus_sum_row else 0
-    bonus_unit = get_global_config("bonus_points", 100)
+    
+    # Dynamic fetching of configured bonus_points
+    bonus_unit = int(get_global_config("bonus_points", 100))
     total_bonus_pts = bonus_claimed_count * bonus_unit
 
     return total_pts, added_count, total_bonus_pts
@@ -529,7 +532,7 @@ async def bot_added_handler(_, update: ChatMemberUpdated):
     if not update.chat:
         return
 
-    # Bot admin tracking across groups
+    # Track Bot added as Admin in groups
     if update.new_chat_member and update.new_chat_member.user and update.new_chat_member.user.is_self:
         if update.from_user and not update.from_user.is_bot:
             chat_id = update.chat.id
@@ -546,7 +549,7 @@ async def bot_added_handler(_, update: ChatMemberUpdated):
     if int(update.chat.id) != int(CLUB_GROUP_ID):
         return
 
-    # Check agar naya user join hua hai
+    # User join detection
     if update.new_chat_member and update.new_chat_member.user and not update.new_chat_member.user.is_self and not update.new_chat_member.user.is_bot:
         u_obj = update.new_chat_member.user
         ensure_user(u_obj)
@@ -569,7 +572,6 @@ async def bot_added_handler(_, update: ChatMemberUpdated):
                 DB.execute("INSERT INTO score_history (user_id, chat_id, points, timestamp) VALUES (?, ?, ?, ?)", (u_id, update.chat.id, join_reward, now))
                 DB.commit()
 
-                # User DM message
                 try:
                     await app.send_message(
                         u_id,
@@ -581,7 +583,6 @@ async def bot_added_handler(_, update: ChatMemberUpdated):
                 except Exception:
                     pass
 
-                # Live detailed log directly to LOG_CHANNEL_ID
                 tot_pts, g_adds, b_pts = get_user_meta_stats(u_id)
                 u_m = get_mention(u_obj)
                 asyncio.create_task(send_log_event(
@@ -1082,7 +1083,7 @@ async def help_cmd(_, message: Message):
             "\n\n<blockquote>🔐 <b>𝐀ᴜᴛʜ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
             "• <code>/word</code> — 𝐕ɪᴇᴡ ᴡᴏʀᴅ ʙᴀɴᴋ\n"
             "• <code>/addword easy cat dog</code> — 𝐁ᴜʟᴋ ᴀᴅᴅ\n"
-            "• <code>/delword easy word</code> — 𝐃ᴇʟᴇᴛᴇ ᴡᴏʀᴅ\n"
+            "• <code>/delword easy cat dog</code> — <b>𝐁ᴜʟᴋ ᴅᴇʟᴇᴛᴇ ᴡᴏʀᴅs</b>\n"
             "• <code>/delallword easy</code> — <b>𝐃ᴇʟᴇᴛᴇ ᴀʟʟ ᴡᴏʀᴅs</b>\n"
             "• <code>/setpoints [easy|med|hard] [pts]</code> — 𝐒ᴇᴛ ᴘᴏɪɴᴛs\n"
             "• <code>/sethint [easy|med|hard] [hints]</code> — 𝐒ᴇᴛ ʜɪɴᴛs\n"
@@ -1092,6 +1093,8 @@ async def help_cmd(_, message: Message):
             "• <code>/log [enable|disable]</code> — <b>Manage Live Game Logs</b>\n"
             "• <code>/link [chat_id]</code> — <b>Generate Instant Group Link</b>\n"
             "• <code>/botstats</code> — <b>View Deep Bot Analytics</b>\n"
+            "• <code>/broadcast [text]</code> — <b>Network Broadcast (Auth & Owner)</b>\n"
+            "• <code>/delbroadcast</code> — <b>Delete Broadcast (Auth & Owner)</b>\n"
             "• <code>/addstar [user] [points]</code> — <b>Add Points/Stars</b>\n"
             "• <code>/deductstar [user] [points]</code> — <b>Deduct Points/Stars</b>\n"
             "• <code>/update</code> — 𝐆ɪᴛ sᴛᴀsʜ, ᴘᴜʟʟ & 𝐑ᴇsᴜᴍᴇ</blockquote>"
@@ -1099,10 +1102,6 @@ async def help_cmd(_, message: Message):
     if message.from_user and is_owner(message.from_user.id):
         text += (
             "\n\n<blockquote>👑 <b>𝐎ᴡɴᴇʀ 𝐂ᴏᴍᴍᴀɴᴅs:</b>\n"
-            "• <code>/broadcast [text]</code> — All DM users and groups\n"
-            "• <code>/broadcast -user [text]</code> — DM users only\n"
-            "• <code>/broadcast -pinloud [text]</code> — Loud pin broadcast\n"
-            "• <code>/delbroadcast</code> (Reply) — Delete broadcast everywhere\n"
             "• <code>/auth @user</code> — 𝐆ʀᴀɴᴛ ᴀᴜᴛʜ\n"
             "• <code>/unauth @user</code> — 𝐑ᴇᴠᴏᴋᴇ ᴀᴜᴛʜ\n"
             "• <code>/authlist</code> — 𝐀ᴜᴛʜ ʟɪsᴛ\n"
@@ -1323,7 +1322,7 @@ async def settings_cmd(_, message: Message):
         f"🟢 <b>𝐆ᴀᴍᴇ 𝐒ᴛᴀᴛᴜs:</b> <code>{'Running' if s['is_active'] else 'Stopped'}</code>\n"
         f"🗑️ <b>𝐀ᴜᴛᴏ 𝐃ᴇʟᴇᴛᴇ 𝐎ʟᴅ:</b> <code>{'Enabled' if s['auto_delete'] else 'Disabled'}</code>\n"
         f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
-        f"⏱️ <b>𝐓ɪᴍᴇʀs:</b> Easy: <code>{s['easy']}s</code> | Med: <code>{s['medium']}s</code> | Hard: <code>{s['hard']}s</code>\n\n"
+        f"⏱ <b>𝐓ɪᴍᴇʀs:</b> Easy: <code>{s['easy']}s</code> | Med: <code>{s['medium']}s</code> | Hard: <code>{s['hard']}s</code>\n\n"
         f"🌍 <b>𝐆ʟᴏʙᴀʟ 𝐑ᴇᴡᴀʀᴅs:</b> Easy: <code>{p_easy}pts</code> | Med: <code>{p_med}pts</code> | Hard: <code>{p_hard}pts</code>\n"
         f"💡 <b>𝐆ʟᴏʙᴀʟ 𝐇ɪɴᴛs:</b> Easy: <code>{h_easy}</code> | Med: <code>{h_med}</code> | Hard: <code>{h_hard}</code></blockquote>",
         reply_markup=kb,
@@ -1570,7 +1569,7 @@ async def bonus_cmd(_, message: Message):
         f"💰 <b>Total Balance:</b> <code>{tot_pts} pts</code>\n"
         f"🏰 <b>Total Groups Added:</b> <code>{g_adds}</code>\n"
         f"🎁 <b>Total Group Bonus:</b> <code>{b_pts} pts</code>\n"
-        f"🏷️️ <b>Group:</b> {c_title} (<code>{chat_id}</code>)</blockquote>"
+        f"🏷 <b>Group:</b> {c_title} (<code>{chat_id}</code>)</blockquote>"
     ))
 
 # ============================================================
@@ -1696,11 +1695,14 @@ async def bot_deep_stats_cmd(_, message: Message):
     await status_msg.edit_text(stats_text, parse_mode=ParseMode.HTML)
 
 # ============================================================
-# BROADCAST SYSTEM & AUTO-DELETE BROADCAST
+# BROADCAST SYSTEM (AUTH USERS & OWNER ACCESS)
 # ============================================================
 
-@app.on_message(filters.command("broadcast") & filters.user(OWNER_ID))
+@app.on_message(filters.command("broadcast"))
 async def broadcast_handler(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Authorized users broadcast kar sakte hain.")
+
     if len(message.command) < 2 and not message.reply_to_message:
         return await message.reply_text(
             "<blockquote>📢 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐁𝐑𝐎𝐀𝐃𝐂𝐀𝐒𝐓 𝐒𝐔𝐈𝐓𝐄</b>\n\n"
@@ -1785,8 +1787,11 @@ async def broadcast_handler(_, message: Message):
     )
     await status_msg.edit_text(report, parse_mode=ParseMode.HTML)
 
-@app.on_message(filters.command("delbroadcast") & filters.user(OWNER_ID))
+@app.on_message(filters.command("delbroadcast"))
 async def del_broadcast_cmd(_, message: Message):
+    if not message.from_user or not is_authed(message.from_user.id):
+        return await message.reply_text("❌ Sirf Owner aur Authorized users broadcast delete kar sakte hain.")
+
     broadcast_id = None
 
     if message.reply_to_message and message.reply_to_message.text:
@@ -2080,7 +2085,7 @@ async def authlist_cmd(_, message: Message):
     asyncio.create_task(delete_after(res, 10))
 
 # ============================================================
-# WORD BANK
+# BULK WORD BANK ADD & BULK DELETE
 # ============================================================
 
 def process_bulk_words_addition(difficulty: str, raw_text: str):
@@ -2130,7 +2135,10 @@ async def addword_cmd(_, message: Message):
             f"🟢 <b>𝐄ᴀsʏ:</b> <code>{len(WORDS['easy'])}</code>\n"
             f"🟡 <b>𝐌ᴇᴅɪᴜᴍ:</b> <code>{len(WORDS['medium'])}</code>\n"
             f"🔴 <b>𝐇ᴀʀᴅ:</b> <code>{len(WORDS['hard'])}</code>\n\n"
-            "📌 <b>Add:</b> <code>/addword easy cat dog bird</code></blockquote>",
+            "📌 <b>Add Words:</b>\n"
+            "<code>/addword easy cat dog bird tree lion</code>\n\n"
+            "🗑️ <b>Bulk Delete Words:</b>\n"
+            "<code>/delword easy cat dog bird</code></blockquote>",
             reply_markup=kb,
             parse_mode=ParseMode.HTML
         )
@@ -2164,32 +2172,62 @@ async def addword_cmd(_, message: Message):
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
-@app.on_message(filters.command("delword"))
+@app.on_message(filters.command(["delword", "delwords"]))
 async def delword_cmd(_, message: Message):
+    """Bulk deletion enabled: /delword easy dog ping pig or by replying"""
     if not message.from_user or not is_authed(message.from_user.id):
         return await message.reply_text("❌ Aap authorized nahi hain.")
 
-    if len(message.command) < 3:
-        return await message.reply_text("Usage:\n<code>/delword easy apple</code>", parse_mode=ParseMode.HTML)
+    parts = (message.text or "").split()
 
-    difficulty = message.command[1].lower().strip()
-    word_to_del = clean_answer(message.command[2])
+    if len(parts) < 2:
+        return await message.reply_text(
+            "<blockquote><b>Bulk Deletion Usage:</b>\n"
+            "• <code>/delword easy dog ping pig</code>\n"
+            "• Text list par reply karke: <code>/delword easy</code></blockquote>",
+            parse_mode=ParseMode.HTML
+        )
 
+    difficulty = parts[1].lower().strip()
     if difficulty not in WORDS:
-        return await message.reply_text("❌ Valid: <code>easy</code>, <code>medium</code>, <code>hard</code>.", parse_mode=ParseMode.HTML)
+        return await message.reply_text("❌ Category must be: <code>easy</code>, <code>medium</code>, ya <code>hard</code>.", parse_mode=ParseMode.HTML)
 
-    if word_to_del not in WORDS[difficulty]:
-        res = await message.reply_text(f"❌ Word '{word_to_del.upper()}' nahi mila.", parse_mode=ParseMode.HTML)
-        asyncio.create_task(delete_after(message, 5))
-        asyncio.create_task(delete_after(res, 5))
-        return
+    raw_payload = ""
+    if len(parts) >= 3:
+        raw_payload = (message.text or "").split(None, 2)[2]
+    elif message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
+        raw_payload = message.reply_to_message.text or message.reply_to_message.caption
 
-    WORDS[difficulty].remove(word_to_del)
-    DB.execute("DELETE FROM custom_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
-    DB.execute("DELETE FROM used_words WHERE difficulty=? AND word=?", (difficulty, word_to_del))
+    if not raw_payload.strip():
+        return await message.reply_text("❌ Koi words provide nahi kiye gaye delete karne ke liye.", parse_mode=ParseMode.HTML)
+
+    tokens = re.split(r"[\s,;\"'\n\r]+", str(raw_payload))
+    deleted = []
+    not_found = []
+
+    for token in tokens:
+        w = clean_answer(token)
+        if not w:
+            continue
+        if w in WORDS[difficulty]:
+            WORDS[difficulty].remove(w)
+            DB.execute("DELETE FROM custom_words WHERE difficulty=? AND word=?", (difficulty, w))
+            DB.execute("DELETE FROM used_words WHERE difficulty=? AND word=?", (difficulty, w))
+            deleted.append(w.upper())
+        else:
+            not_found.append(w.upper())
+
     DB.commit()
 
-    res = await message.reply_text(f"<blockquote>🗑️ Word <b>'{word_to_del.upper()}'</b> deleted!</blockquote>", parse_mode=ParseMode.HTML)
+    if not deleted and not not_found:
+        return await message.reply_text("❌ Koi valid word delete nahi ho saka.")
+
+    msg_text = f"<blockquote>🗑️ <b>{len(deleted)}</b> word(s) successfully deleted from <b>{difficulty.upper()}</b> bank!"
+    if not_found:
+        msg_text += f"\n⚠️ <i>{len(not_found)} word(s) list me nahi mile (Skipped).</i>"
+    msg_text += "</blockquote>"
+
+    res = await message.reply_text(msg_text, parse_mode=ParseMode.HTML)
     asyncio.create_task(delete_after(message, 5))
     asyncio.create_task(delete_after(res, 5))
 
@@ -2458,7 +2496,7 @@ async def jumble_bet_fight_cmd(_, message: Message):
 ALL_BOT_COMMANDS = {
     "start", "help", "jumble", "jumblefight", "fight", "rapido", "jumblebetfight", "betfight",
     "settings", "setting", "setpoints", "sethint", "setdaily", "setbonus", "joinreward", "daily", "bonus",
-    "private", "public", "addword", "addwords", "delword", "delallword", "delallwords",
+    "private", "public", "addword", "addwords", "delword", "delwords", "delallword", "delallwords",
     "clearword", "clearwords", "word", "words", "auth", "unauth", "authlist", "update", "gitpull",
     "stats", "stat", "mystats", "score", "leaderboard", "top", "rank", "lb", "backup", "dbbackup", "getdb",
     "addstar", "addpoints", "deductstar", "deductpoints", "removestar", "log", "link", "botstats",
@@ -2719,13 +2757,13 @@ async def callback_router(_, query: CallbackQuery):
     elif data.startswith("wb_"):
         await query.answer()
         if not is_authed(user_id):
-            return await query.answer("❌ Authorized users only.", show_alert=True)
+            return await query.answer("❌ Sirf Auth Users word bank dekh sakte hain.", show_alert=True)
 
         _, diff, page_str = data.split("_")
         page = int(page_str)
         word_list = sorted(WORDS.get(diff, []))
         total_words = len(word_list)
-        per_page = 20
+        per_page = 120  # Expanded to display maximum words in one page
         total_pages = max(1, (total_words + per_page - 1) // per_page)
         page = max(1, min(page, total_pages))
 
@@ -2756,10 +2794,11 @@ async def callback_router(_, query: CallbackQuery):
         ])
 
         msg = (
-            f"<blockquote>📚 <b>{diff.upper()} 𝐖𝐎𝐑𝐃𝐒 𝐁𝐀𝐍𝐊</b> (Total: <code>{total_words}</code>)\n\n"
+            f"<blockquote>📚 <b>{diff.upper()} 𝐖𝐎𝐑𝐃𝐒 𝐁𝐀𝐍𝐊</b> (Total: <code>{total_words}</code>)\n"
+            f"📌 <i>Tip: Tap on any word below to single-tap copy!</i>\n\n"
             f"{formatted_list}\n\n"
             f"➕ <b>Add:</b> <code>/addword {diff} word</code>\n"
-            f"➖ <b>Del:</b> <code>/delword {diff} word</code>\n"
+            f"➖ <b>Bulk Del:</b> <code>/delword {diff} word1 word2</code>\n"
             f"🗑️ <b>Clear All:</b> <code>/delallword {diff}</code></blockquote>"
         )
 
@@ -2795,7 +2834,8 @@ async def callback_router(_, query: CallbackQuery):
             await query.message.edit_text(
                 "<blockquote>📚 <b>𝐉𝐔𝐌𝐁𝐋𝐄 𝐖𝐎𝐑𝐃 𝐁𝐀𝐍𝐊</b>\n\n"
                 f"🟢 <b>𝐄ᴀsʏ:</b> <code>{len(WORDS['easy'])}</code> | 🟡 <b>𝐌ᴇᴅ:</b> <code>{len(WORDS['medium'])}</code> | 🔴 <b>𝐇ᴀʀᴅ:</b> <code>{len(WORDS['hard'])}</code>\n\n"
-                "📌 <b>Add:</b> <code>/addword easy cat dog bird</code></blockquote>",
+                "📌 <b>Add:</b> <code>/addword easy cat dog bird</code>\n"
+                "🗑️ <b>Bulk Delete:</b> <code>/delword easy cat dog bird</code></blockquote>",
                 reply_markup=kb,
                 parse_mode=ParseMode.HTML
             )
@@ -3123,7 +3163,7 @@ async def show_settings_panel(message_obj, chat_id):
         f"🟢 <b>𝐆ᴀᴍᴇ 𝐒ᴛᴀᴛᴜs:</b> <code>{'Running' if s['is_active'] else 'Stopped'}</code>\n"
         f"🗑️ <b>𝐀ᴜᴛᴏ 𝐃ᴇʟᴇᴛᴇ 𝐎ʟᴅ:</b> <code>{'Enabled' if s['auto_delete'] else 'Disabled'}</code>\n"
         f"🎯 <b>𝐃ᴇғᴀᴜʟᴛ 𝐌ᴏᴅᴇ:</b> <code>{str(cur_diff).title()}</code>\n"
-        f"⏱️️ <b>𝐓ɪᴍᴇʀs:</b> Easy: <code>{s['easy']}s</code> | Med: <code>{s['medium']}s</code> | Hard: <code>{s['hard']}s</code>\n\n"
+        f"⏱ <b>𝐓ɪᴍᴇʀs:</b> Easy: <code>{s['easy']}s</code> | Med: <code>{s['medium']}s</code> | Hard: <code>{s['hard']}s</code>\n\n"
         f"🌍 <b>𝐆ʟᴏʙᴀʟ 𝐑ᴇᴡᴀʀᴅs:</b> Easy: <code>{p_easy}pts</code> | Med: <code>{p_med}pts</code> | Hard: <code>{p_hard}pts</code>\n"
         f"💡 <b>𝐆ʟᴏʙᴀʟ 𝐇ɪɴᴛs:</b> Easy: <code>{h_easy}</code> | Med: <code>{h_med}</code> | Hard: <code>{h_hard}</code></blockquote>"
     )
